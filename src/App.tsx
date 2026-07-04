@@ -30,9 +30,13 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import type { KonvaEventObject } from "konva/lib/Node";
-import { Circle, Ellipse, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text } from "react-konva";
+import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text } from "react-konva";
+import MediaUploadAction from "./components/MediaUploadAction";
+import PlanFixtureGlyph from "./components/PlanFixtureGlyph";
+import RoomGallery from "./components/RoomGallery";
+import SidebarSection from "./components/SidebarSection";
 import { db, loadProjects, saveProjects } from "./db";
 import {
   constrainOpeningHandle,
@@ -48,7 +52,19 @@ import {
   snapThreshold,
   wallAngle,
 } from "./geometry";
-import { pdfFileToImageAsset } from "./pdf";
+import { loadImage, useHtmlImage } from "./image";
+import {
+  defaultFixtureSize,
+  findActiveProject,
+  findPlanObject,
+  fixtureKinds,
+  getOrCreateRoomBoard,
+  roomColors,
+  safeGridSize,
+  safePixelsPerMeter,
+  type SelectablePlanObject,
+  type StructureSelection,
+} from "./model";
 import type {
   Alternative,
   Asset,
@@ -56,7 +72,6 @@ import type {
   FixtureKind,
   Floor,
   Opening,
-  Plan,
   PlanPoint,
   PropertyProject,
   Room,
@@ -79,7 +94,8 @@ import {
   roomPoints,
   uid,
 } from "./utils";
-import ThreePreview from "./ThreePreview";
+
+const ThreePreview = lazy(() => import("./ThreePreview"));
 
 const toolGroups: Array<{
   title: string;
@@ -114,84 +130,6 @@ const toolGroups: Array<{
   },
 ];
 
-const fixtureKinds: FixtureKind[] = [
-  "counter",
-  "sink",
-  "toilet",
-  "shower",
-  "tub",
-  "stairs",
-  "closet",
-  "sofa",
-  "bed",
-  "table",
-];
-
-const roomColors = ["#a8c8bb", "#d8c079", "#d3aaa3", "#a8bdc8", "#beb0ca", "#b9c98e"];
-
-type SelectablePlanObject = Plan["rooms"][number] | Plan["openings"][number] | Plan["fixtures"][number] | Plan["walls"][number];
-type StructureSelection = { type: "project" | "floor" | "alternative"; id: string };
-
-function defaultFixtureSize(kind: FixtureKind) {
-  switch (kind) {
-    case "counter":
-      return { width: 132, height: 46 };
-    case "sink":
-      return { width: 64, height: 56 };
-    case "toilet":
-      return { width: 50, height: 68 };
-    case "shower":
-      return { width: 74, height: 74 };
-    case "tub":
-      return { width: 108, height: 58 };
-    case "stairs":
-      return { width: 116, height: 124 };
-    case "closet":
-      return { width: 96, height: 56 };
-    case "sofa":
-      return { width: 112, height: 64 };
-    case "bed":
-      return { width: 92, height: 128 };
-    case "table":
-      return { width: 84, height: 84 };
-  }
-}
-
-function useHtmlImage(src?: string) {
-  const [image, setImage] = useState<HTMLImageElement | undefined>();
-  useEffect(() => {
-    if (!src) {
-      setImage(undefined);
-      return;
-    }
-    const img = new window.Image();
-    img.onload = () => setImage(img);
-    img.src = src;
-  }, [src]);
-  return image;
-}
-
-function loadImage(src: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new window.Image();
-    image.onload = () => resolve(image);
-    image.onerror = reject;
-    image.src = src;
-  });
-}
-
-function findPlanObject(plan: Plan, id: string): SelectablePlanObject | undefined {
-  return [...plan.rooms, ...plan.openings, ...plan.fixtures, ...plan.walls].find((item) => item.id === id);
-}
-
-function getOrCreateRoomBoard(alternative: Alternative, roomId: string): RoomBoard {
-  const existing = alternative.roomBoards.find((item) => item.roomId === roomId);
-  if (existing) return existing;
-  const board = createRoomBoard(roomId);
-  alternative.roomBoards.push(board);
-  return board;
-}
-
 function App() {
   const [projects, setProjects] = useState<PropertyProject[]>([]);
   const [activePropertyId, setActivePropertyId] = useState("");
@@ -220,6 +158,7 @@ function App() {
   });
   const canvasShellRef = useRef<HTMLDivElement>(null);
   const panLastRef = useRef<{ x: number; y: number } | null>(null);
+  const snappingDisabledRef = useRef(false);
   const importRef = useRef<HTMLInputElement>(null);
   const jsonImportRef = useRef<HTMLInputElement>(null);
 
@@ -251,12 +190,18 @@ function App() {
       if (rect) setStageSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
     };
     measure();
+    const resizeObserver = new ResizeObserver(measure);
+    if (canvasShellRef.current) resizeObserver.observe(canvasShellRef.current);
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   }, [view]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      snappingDisabledRef.current = event.altKey;
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT";
@@ -276,16 +221,22 @@ function App() {
       }
     };
     const handleKeyUp = (event: KeyboardEvent) => {
+      snappingDisabledRef.current = event.altKey;
       if (event.code === "Space") {
         setSpacePanning(false);
         stopPanning();
       }
     };
+    const handleBlur = () => {
+      snappingDisabledRef.current = false;
+    };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
     };
   }, [polygonDraft, tool]);
 
@@ -299,10 +250,7 @@ function App() {
   }, [previewAsset]);
 
   const active = useMemo(() => {
-    const property = projects.find((item) => item.id === activePropertyId);
-    const floor = property?.floors.find((item) => item.id === activeFloorId);
-    const alternative = floor?.alternatives.find((item) => item.id === activeAlternativeId);
-    return { property, floor, alternative };
+    return findActiveProject(projects, activePropertyId, activeFloorId, activeAlternativeId);
   }, [activeAlternativeId, activeFloorId, activePropertyId, projects]);
 
   const activeStructure = useMemo(() => {
@@ -356,10 +304,7 @@ function App() {
   }
 
   function findActiveDraft(draft: PropertyProject[]) {
-    const property = draft.find((item) => item.id === activePropertyId);
-    const floor = property?.floors.find((item) => item.id === activeFloorId);
-    const alternative = floor?.alternatives.find((item) => item.id === activeAlternativeId);
-    return { property, floor, alternative };
+    return findActiveProject(draft, activePropertyId, activeFloorId, activeAlternativeId);
   }
 
   function updateAlternative(updater: (alternative: Alternative) => void) {
@@ -370,6 +315,13 @@ function App() {
         property.updatedAt = nowIso();
       }
       return draft;
+    });
+  }
+
+  function updatePlanScaleNumber(field: "pixelsPerMeter" | "gridSize", value: number, minimum: number) {
+    if (!Number.isFinite(value) || value < minimum) return;
+    updateAlternative((alternative) => {
+      alternative.plan.scale[field] = value;
     });
   }
 
@@ -557,7 +509,10 @@ function App() {
     const file = files?.[0];
     if (!file) return;
     setStatus("Importing floorplan...");
-    const asset = file.type === "application/pdf" ? await pdfFileToImageAsset(file) : await readFileAsDataUrl(file);
+    const asset =
+      file.type === "application/pdf"
+        ? await import("./pdf").then(({ pdfFileToImageAsset }) => pdfFileToImageAsset(file))
+        : await readFileAsDataUrl(file);
     const image = await loadImage(asset.dataUrl);
     const width = Math.min(image.width, Math.max(320, stageSize.width - 40));
     const height = (width / image.width) * image.height;
@@ -598,13 +553,15 @@ function App() {
   }
 
   function gridLines() {
-    const grid = active.alternative?.plan.scale.gridSize ?? 26;
+    const grid = active.alternative ? safeGridSize(active.alternative.plan) : 26;
     const lines = [];
     const visibleLeft = -viewport.x / viewport.scale;
     const visibleTop = -viewport.y / viewport.scale;
     const visibleRight = (stageSize.width - viewport.x) / viewport.scale;
     const visibleBottom = (stageSize.height - viewport.y) / viewport.scale;
-    for (let x = visibleLeft; x < visibleRight + grid; x += grid) {
+    const firstGridX = Math.floor(visibleLeft / grid) * grid;
+    const firstGridY = Math.floor(visibleTop / grid) * grid;
+    for (let x = firstGridX; x < visibleRight + grid; x += grid) {
       lines.push(
         <Line
           key={`gx-${x}`}
@@ -615,7 +572,7 @@ function App() {
         />,
       );
     }
-    for (let y = visibleTop; y < visibleBottom + grid; y += grid) {
+    for (let y = firstGridY; y < visibleBottom + grid; y += grid) {
       lines.push(
         <Line
           key={`gy-${y}`}
@@ -641,7 +598,7 @@ function App() {
   function stagePointer(event: KonvaEventObject<MouseEvent | WheelEvent | DragEvent>, snapToGrid = true) {
     const point = stagePlanPointer(event);
     if (!point || !active.alternative || !snapToGrid) return point;
-    return snapPointToGrid(point, active.alternative.plan.scale.gridSize);
+    return snapPointToGrid(point, safeGridSize(active.alternative.plan));
   }
 
   function planToStagePoint(point: PlanPoint): PlanPoint {
@@ -718,16 +675,17 @@ function App() {
       if (tool === "wall") {
         const start = snappingDisabled
           ? point
-          : snapStructuralPoint(point, plan.walls, plan.scale.gridSize);
+          : snapStructuralPoint(point, plan.walls, safeGridSize(plan));
+        const gridSize = safeGridSize(plan);
         const wall: Wall = {
           id: uid("wall"),
           kind: "wall",
           name: "Wall",
           x: start.x,
           y: start.y,
-          x2: start.x + plan.scale.gridSize * 6,
+          x2: start.x + gridSize * 6,
           y2: start.y,
-          width: plan.scale.gridSize * 6,
+          width: gridSize * 6,
           height: 12,
           thickness: 12,
           rotation: 0,
@@ -736,19 +694,20 @@ function App() {
         setSelectedId(wall.id);
       }
       if (tool === "room") {
+        const gridSize = safeGridSize(plan);
         const room: Room = {
           id: uid("room"),
           kind: "room",
           name: `Room ${plan.rooms.length + 1}`,
           x: point.x,
           y: point.y,
-          width: plan.scale.gridSize * 6,
-          height: plan.scale.gridSize * 4,
+          width: gridSize * 6,
+          height: gridSize * 4,
           rotation: 0,
           color: roomColors[plan.rooms.length % roomColors.length],
           points: rectangleRoomPoints({
-            width: plan.scale.gridSize * 6,
-            height: plan.scale.gridSize * 4,
+            width: gridSize * 6,
+            height: gridSize * 4,
           }),
         };
         plan.rooms.push(room);
@@ -863,7 +822,7 @@ function App() {
   }
 
   function snapOpeningToWall(opening: Opening, plan: Alternative["plan"]) {
-    const nearest = nearestOpeningWall(opening, plan.walls, snapThreshold(plan.scale.gridSize) * 1.5);
+    const nearest = nearestOpeningWall(opening, plan.walls, snapThreshold(safeGridSize(plan)) * 1.5);
     if (!nearest) {
       opening.wallId = undefined;
       return;
@@ -893,7 +852,7 @@ function App() {
         endpoint,
         point,
         alternative.plan.walls,
-        alternative.plan.scale.gridSize,
+        safeGridSize(alternative.plan),
         snappingDisabled,
       );
 
@@ -915,9 +874,10 @@ function App() {
       let offset = { x: dx, y: dy };
 
       if (!snappingDisabled) {
-        const snappedStart = snapStructuralPoint(nextStart, alternative.plan.walls, alternative.plan.scale.gridSize, wall.id);
+        const gridSize = safeGridSize(alternative.plan);
+        const snappedStart = snapStructuralPoint(nextStart, alternative.plan.walls, gridSize, wall.id);
         const startDistance = distance(nextStart, snappedStart);
-        const snappedEnd = snapStructuralPoint(nextEnd, alternative.plan.walls, alternative.plan.scale.gridSize, wall.id);
+        const snappedEnd = snapStructuralPoint(nextEnd, alternative.plan.walls, gridSize, wall.id);
         const endDistance = distance(nextEnd, snappedEnd);
         if (startDistance <= endDistance) {
           offset = { x: snappedStart.x - wall.x, y: snappedStart.y - wall.y };
@@ -939,7 +899,7 @@ function App() {
       if (!wall) return;
       const nextPoint = snappingDisabled
         ? point
-        : snapStructuralPoint(point, alternative.plan.walls, alternative.plan.scale.gridSize, wall.id);
+        : snapStructuralPoint(point, alternative.plan.walls, safeGridSize(alternative.plan), wall.id);
       if (endpoint === "start") {
         wall.x = nextPoint.x;
         wall.y = nextPoint.y;
@@ -957,7 +917,7 @@ function App() {
     updateAlternative((alternative) => {
       const object = [...alternative.plan.rooms, ...alternative.plan.fixtures].find((item) => item.id === id);
       if (!object) return;
-      const nextPoint = snappingDisabled ? { x, y } : snapPointToGrid({ x, y }, alternative.plan.scale.gridSize);
+      const nextPoint = snappingDisabled ? { x, y } : snapPointToGrid({ x, y }, safeGridSize(alternative.plan));
       object.x = nextPoint.x;
       object.y = nextPoint.y;
     });
@@ -1077,7 +1037,7 @@ function App() {
   }
 
   function updateSelectedRoomDimensionMeters(dimension: "width" | "height", value: number) {
-    const pixelsPerMeter = active.alternative?.plan.scale.pixelsPerMeter;
+    const pixelsPerMeter = active.alternative ? safePixelsPerMeter(active.alternative.plan) : undefined;
     if (!pixelsPerMeter || Number.isNaN(value)) return;
     updateSelectedDimension(dimension, value * pixelsPerMeter);
   }
@@ -1128,9 +1088,9 @@ function App() {
   const selectedRoom = selection && "kind" in selection && selection.kind === "room" ? (selection as Room) : undefined;
   const selectedRoomHeight = selectedRoom?.ceilingHeightMeters ?? plan?.scale.ceilingHeightMeters ?? 2.55;
   const selectedRoomWidthMeters =
-    selectedRoom && plan ? metersFromPixels(selectedRoom.width, plan.scale.pixelsPerMeter) : 0;
+    selectedRoom && plan ? metersFromPixels(selectedRoom.width, safePixelsPerMeter(plan)) : 0;
   const selectedRoomLengthMeters =
-    selectedRoom && plan ? metersFromPixels(selectedRoom.height, plan.scale.pixelsPerMeter) : 0;
+    selectedRoom && plan ? metersFromPixels(selectedRoom.height, safePixelsPerMeter(plan)) : 0;
   const selectedShape = selection && !selectedRoom ? selection : undefined;
   const selectedShapeWidthLabel = selectedShape && "x2" in selectedShape ? "Length" : "Width";
   const selectedShapeHeightLabel = selectedShape && "x2" in selectedShape ? "Thickness" : "Height";
@@ -1361,11 +1321,7 @@ function App() {
                     type="number"
                     min={10}
                     value={plan?.scale.pixelsPerMeter ?? 52}
-                    onChange={(event) =>
-                      updateAlternative((alternative) => {
-                        alternative.plan.scale.pixelsPerMeter = Number(event.target.value);
-                      })
-                    }
+                    onChange={(event) => updatePlanScaleNumber("pixelsPerMeter", Number(event.target.value), 10)}
                   />
                 </label>
                 <label>
@@ -1374,11 +1330,7 @@ function App() {
                     type="number"
                     min={8}
                     value={plan?.scale.gridSize ?? 26}
-                    onChange={(event) =>
-                      updateAlternative((alternative) => {
-                        alternative.plan.scale.gridSize = Number(event.target.value);
-                      })
-                    }
+                    onChange={(event) => updatePlanScaleNumber("gridSize", Number(event.target.value), 8)}
                   />
                 </label>
               </div>
@@ -1546,7 +1498,7 @@ function App() {
                           x={labelPoint.x - 50}
                           y={labelPoint.y - 13}
                           width={100}
-                          text={`${room.name}\n${roomArea(room, plan.scale.pixelsPerMeter).toFixed(1)} m2`}
+                          text={`${room.name}\n${roomArea(room, safePixelsPerMeter(plan)).toFixed(1)} m2`}
                           fontSize={12}
                           fontStyle="bold"
                           fill="#242a27"
@@ -1626,8 +1578,9 @@ function App() {
                               strokeWidth={2}
                               draggable
                               dragBoundFunc={(position) => {
+                                if (snappingDisabledRef.current) return position;
                                 const point = stageToPlanPoint(position);
-                                const constrained = snapStructuralPoint(point, plan.walls, plan.scale.gridSize, wall.id);
+                                const constrained = snapStructuralPoint(point, plan.walls, safeGridSize(plan), wall.id);
                                 return planToStagePoint(constrained);
                               }}
                               onMouseDown={(event) => {
@@ -1659,7 +1612,7 @@ function App() {
                         key={`${wall.id}-measurement`}
                         x={(wall.x + wall.x2) / 2 - 18}
                         y={(wall.y + wall.y2) / 2 - 24}
-                        text={`${metersFromPixels(length, plan.scale.pixelsPerMeter).toFixed(2)} m`}
+                        text={`${metersFromPixels(length, safePixelsPerMeter(plan)).toFixed(2)} m`}
                         fontSize={12}
                         fill="#687068"
                         listening={false}
@@ -1682,6 +1635,7 @@ function App() {
                           cornerRadius={2}
                           draggable={tool === "select"}
                           dragBoundFunc={(position) => {
+                            if (snappingDisabledRef.current) return position;
                             const point = stageToPlanPoint(position);
                             const constrained = constrainedOpeningPosition(opening, point.x, point.y, plan, false);
                             return planToStagePoint({ x: constrained.x, y: constrained.y });
@@ -1712,12 +1666,13 @@ function App() {
                               strokeWidth={2}
                               draggable
                               dragBoundFunc={(position) => {
+                                if (snappingDisabledRef.current) return position;
                                 const constrained = constrainOpeningHandle(
                                   opening,
                                   handle.endpoint,
                                   stageToPlanPoint(position),
                                   plan.walls,
-                                  plan.scale.gridSize,
+                                  safeGridSize(plan),
                                   false,
                                 );
                                 return planToStagePoint(constrained.point);
@@ -2086,7 +2041,7 @@ function App() {
                           <span className="room-rail-color" style={{ background: room.color }} />
                           <span className="room-rail-copy">
                             <strong>{room.name}</strong>
-                            <small>{roomArea(room, plan.scale.pixelsPerMeter).toFixed(1)} m2</small>
+                            <small>{roomArea(room, safePixelsPerMeter(plan)).toFixed(1)} m2</small>
                           </span>
                           <span className="room-rail-counts">
                             <span>{board.photos.length} raw</span>
@@ -2106,7 +2061,7 @@ function App() {
                     <div>
                       <h2>{activeMediaRoom.name}</h2>
                       <p>
-                        {roomArea(activeMediaRoom, plan.scale.pixelsPerMeter).toFixed(1)} m2 ·{" "}
+                        {roomArea(activeMediaRoom, safePixelsPerMeter(plan)).toFixed(1)} m2 ·{" "}
                         {activeMediaBoard.photos.length} raw · {activeMediaBoard.renderOutputs.length} renders
                       </p>
                     </div>
@@ -2162,7 +2117,9 @@ function App() {
 
         {view === "three" && plan && (
           <div className="three-shell">
-            <ThreePreview plan={plan} />
+            <Suspense fallback={<div className="walkthrough-help">Loading 3D preview...</div>}>
+              <ThreePreview plan={plan} />
+            </Suspense>
           </div>
         )}
       </main>
@@ -2183,415 +2140,6 @@ function App() {
         </div>
       )}
     </div>
-  );
-}
-
-function PlanFixtureGlyph({ fixture, selected }: { fixture: Fixture; selected: boolean }) {
-  const { width, height } = fixture;
-  const stroke = selected ? "#242a27" : "#66756d";
-  const strokeWidth = selected ? 2.5 : 1.5;
-  const fill = "#fffdf7";
-  const accent = "#d6e4dd";
-  const detail = "#4c5c54";
-  const labelY = Math.max(4, height - 14);
-
-  const label = (
-    <Text
-      x={4}
-      y={labelY}
-      width={Math.max(0, width - 8)}
-      text={fixtureLabels[fixture.kind]}
-      fontSize={9}
-      fontStyle="bold"
-      align="center"
-      fill="#303732"
-      listening={false}
-    />
-  );
-
-  let glyph: JSX.Element;
-  switch (fixture.kind) {
-    case "counter":
-      glyph = (
-        <>
-          <Line points={[12, height * 0.5, width - 12, height * 0.5]} stroke={detail} strokeWidth={1.2} listening={false} />
-          {[0.33, 0.66].map((ratio) => (
-            <Line
-              key={ratio}
-              points={[width * ratio, 9, width * ratio, height - 9]}
-              stroke={detail}
-              strokeWidth={1}
-              listening={false}
-            />
-          ))}
-          <Ellipse
-            x={width * 0.83}
-            y={height * 0.5}
-            radiusX={Math.max(8, width * 0.08)}
-            radiusY={Math.max(6, height * 0.2)}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1}
-            listening={false}
-          />
-        </>
-      );
-      break;
-    case "sink":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.18}
-            y={height * 0.16}
-            width={width * 0.64}
-            height={height * 0.54}
-            cornerRadius={10}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.2}
-            listening={false}
-          />
-          <Ellipse
-            x={width * 0.5}
-            y={height * 0.43}
-            radiusX={width * 0.21}
-            radiusY={height * 0.17}
-            fill={fill}
-            stroke={detail}
-            strokeWidth={1}
-            listening={false}
-          />
-          <Line
-            points={[width * 0.5, height * 0.2, width * 0.5, height * 0.3, width * 0.58, height * 0.3]}
-            stroke={detail}
-            strokeWidth={1.4}
-            lineCap="round"
-            lineJoin="round"
-            listening={false}
-          />
-        </>
-      );
-      break;
-    case "toilet":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.2}
-            y={height * 0.1}
-            width={width * 0.6}
-            height={height * 0.2}
-            cornerRadius={4}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.2}
-            listening={false}
-          />
-          <Line points={[width * 0.5, height * 0.3, width * 0.5, height * 0.38]} stroke={detail} strokeWidth={1} listening={false} />
-          <Ellipse
-            x={width * 0.5}
-            y={height * 0.53}
-            radiusX={width * 0.28}
-            radiusY={height * 0.2}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.3}
-            listening={false}
-          />
-          <Ellipse
-            x={width * 0.5}
-            y={height * 0.53}
-            radiusX={width * 0.13}
-            radiusY={height * 0.09}
-            fill={fill}
-            stroke={detail}
-            strokeWidth={0.9}
-            listening={false}
-          />
-        </>
-      );
-      break;
-    case "shower":
-      glyph = (
-        <>
-          <Line points={[10, height - 10, width - 10, 10]} stroke={detail} strokeWidth={1.2} listening={false} />
-          <Circle x={width * 0.72} y={height * 0.72} radius={4} fill={detail} listening={false} />
-          <Line
-            points={[width * 0.22, height * 0.2, width * 0.34, height * 0.2, width * 0.34, height * 0.32]}
-            stroke={detail}
-            strokeWidth={1.3}
-            lineCap="round"
-            lineJoin="round"
-            listening={false}
-          />
-          <Circle x={width * 0.37} y={height * 0.35} radius={4} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
-        </>
-      );
-      break;
-    case "tub":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.08}
-            y={height * 0.2}
-            width={width * 0.84}
-            height={height * 0.44}
-            cornerRadius={16}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.3}
-            listening={false}
-          />
-          <Ellipse
-            x={width * 0.5}
-            y={height * 0.42}
-            radiusX={width * 0.32}
-            radiusY={height * 0.14}
-            fill={fill}
-            stroke={detail}
-            strokeWidth={0.9}
-            listening={false}
-          />
-          <Circle x={width * 0.18} y={height * 0.25} radius={3} fill={detail} listening={false} />
-          <Circle x={width * 0.24} y={height * 0.25} radius={3} fill={detail} listening={false} />
-        </>
-      );
-      break;
-    case "stairs":
-      glyph = (
-        <>
-          {[1, 2, 3, 4, 5, 6].map((step) => {
-            const y = (height * step) / 7;
-            return (
-              <Line
-                key={step}
-                points={[12, y, width - 12, y]}
-                stroke={detail}
-                strokeWidth={1.2}
-                listening={false}
-              />
-            );
-          })}
-          <Line points={[width * 0.24, height - 16, width * 0.76, 16]} stroke={detail} strokeWidth={1.4} listening={false} />
-        </>
-      );
-      break;
-    case "closet":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.1}
-            y={height * 0.18}
-            width={width * 0.8}
-            height={height * 0.5}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.2}
-            listening={false}
-          />
-          <Line points={[width * 0.5, height * 0.18, width * 0.5, height * 0.68]} stroke={detail} strokeWidth={1} listening={false} />
-          <Circle x={width * 0.45} y={height * 0.43} radius={2.5} fill={detail} listening={false} />
-          <Circle x={width * 0.55} y={height * 0.43} radius={2.5} fill={detail} listening={false} />
-        </>
-      );
-      break;
-    case "sofa":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.12}
-            y={height * 0.2}
-            width={width * 0.76}
-            height={height * 0.24}
-            cornerRadius={8}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.2}
-            listening={false}
-          />
-          <Rect
-            x={width * 0.08}
-            y={height * 0.4}
-            width={width * 0.84}
-            height={height * 0.24}
-            cornerRadius={8}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.2}
-            listening={false}
-          />
-          <Line points={[width * 0.5, height * 0.41, width * 0.5, height * 0.63]} stroke={detail} strokeWidth={1} listening={false} />
-          <Rect x={width * 0.04} y={height * 0.36} width={width * 0.1} height={height * 0.3} cornerRadius={4} fill={detail} listening={false} />
-          <Rect x={width * 0.86} y={height * 0.36} width={width * 0.1} height={height * 0.3} cornerRadius={4} fill={detail} listening={false} />
-        </>
-      );
-      break;
-    case "bed":
-      glyph = (
-        <>
-          <Rect
-            x={width * 0.12}
-            y={height * 0.12}
-            width={width * 0.76}
-            height={height * 0.72}
-            cornerRadius={6}
-            fill={accent}
-            stroke={detail}
-            strokeWidth={1.3}
-            listening={false}
-          />
-          <Rect
-            x={width * 0.2}
-            y={height * 0.18}
-            width={width * 0.6}
-            height={height * 0.18}
-            cornerRadius={5}
-            fill={fill}
-            stroke={detail}
-            strokeWidth={1}
-            listening={false}
-          />
-          <Line points={[width * 0.12, height * 0.43, width * 0.88, height * 0.43]} stroke={detail} strokeWidth={1} listening={false} />
-          <Line points={[width * 0.5, height * 0.43, width * 0.5, height * 0.84]} stroke={detail} strokeWidth={0.9} listening={false} />
-        </>
-      );
-      break;
-    case "table":
-      glyph = (
-        <>
-          <Rect x={width * 0.38} y={height * 0.04} width={width * 0.24} height={height * 0.12} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
-          <Rect x={width * 0.38} y={height * 0.84} width={width * 0.24} height={height * 0.12} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
-          <Rect x={width * 0.04} y={height * 0.38} width={width * 0.12} height={height * 0.24} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
-          <Rect x={width * 0.84} y={height * 0.38} width={width * 0.12} height={height * 0.24} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
-          <Ellipse
-            x={width * 0.5}
-            y={height * 0.5}
-            radiusX={width * 0.3}
-            radiusY={height * 0.24}
-            fill={fill}
-            stroke={detail}
-            strokeWidth={1.3}
-            listening={false}
-          />
-        </>
-      );
-      break;
-  }
-
-  return (
-    <>
-      <Rect
-        width={width}
-        height={height}
-        fill={fill}
-        stroke={stroke}
-        strokeWidth={strokeWidth}
-        cornerRadius={fixture.kind === "sink" || fixture.kind === "toilet" || fixture.kind === "table" ? 14 : 5}
-      />
-      {glyph}
-      {label}
-    </>
-  );
-}
-
-function MediaUploadAction({ label, onFiles }: { label: string; onFiles: (files: FileList | null) => void }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  return (
-    <>
-      <button className="media-upload-action" onClick={() => inputRef.current?.click()} type="button">
-        <ImagePlus size={16} />
-        {label}
-      </button>
-      <input
-        hidden
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        onChange={(event) => {
-          onFiles(event.target.files);
-          event.currentTarget.value = "";
-        }}
-      />
-    </>
-  );
-}
-
-function RoomGallery({
-  assets,
-  label,
-  emptyLabel,
-  onOpenAsset,
-  onRemoveAsset,
-}: {
-  assets: Asset[];
-  label: string;
-  emptyLabel: string;
-  onOpenAsset: (asset: Asset, label: string) => void;
-  onRemoveAsset: (assetId: string) => void;
-}) {
-  if (assets.length === 0) {
-    return (
-      <div className="gallery-empty">
-        <Camera size={24} />
-        <p>{emptyLabel}</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="room-gallery">
-      {assets.map((asset, index) => (
-        <figure
-          className={index === 0 ? "gallery-card featured" : "gallery-card"}
-          key={asset.id}
-          role="button"
-          tabIndex={0}
-          onClick={() => onOpenAsset(asset, label)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            onOpenAsset(asset, label);
-          }}
-        >
-          <img src={asset.dataUrl} alt={asset.name} />
-          <figcaption>
-            <span>{label}</span>
-            <strong>{asset.name}</strong>
-          </figcaption>
-          <button
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemoveAsset(asset.id);
-            }}
-            title={`Remove ${asset.name}`}
-          >
-            <Trash2 size={16} />
-          </button>
-        </figure>
-      ))}
-    </div>
-  );
-}
-
-function SidebarSection({
-  title,
-  collapsed,
-  onToggle,
-  children,
-}: {
-  title: string;
-  collapsed: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <section className="sidebar-section">
-      <button className="sidebar-section-header" onClick={onToggle} type="button">
-        <span>{title}</span>
-        {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
-      </button>
-      {!collapsed && <div className="sidebar-section-body">{children}</div>}
-    </section>
   );
 }
 
