@@ -17,6 +17,8 @@ import {
   Layers3,
   Maximize2,
   MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pentagon,
   PencilRuler,
   Plus,
@@ -24,14 +26,13 @@ import {
   Square,
   Trash2,
   Upload,
-  WandSparkles,
   X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { KonvaEventObject } from "konva/lib/Node";
-import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text } from "react-konva";
+import { Circle, Ellipse, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text } from "react-konva";
 import { db, loadProjects, saveProjects } from "./db";
 import {
   constrainOpeningHandle,
@@ -131,6 +132,31 @@ const roomColors = ["#a8c8bb", "#d8c079", "#d3aaa3", "#a8bdc8", "#beb0ca", "#b9c
 type SelectablePlanObject = Plan["rooms"][number] | Plan["openings"][number] | Plan["fixtures"][number] | Plan["walls"][number];
 type StructureSelection = { type: "project" | "floor" | "alternative"; id: string };
 
+function defaultFixtureSize(kind: FixtureKind) {
+  switch (kind) {
+    case "counter":
+      return { width: 132, height: 46 };
+    case "sink":
+      return { width: 64, height: 56 };
+    case "toilet":
+      return { width: 50, height: 68 };
+    case "shower":
+      return { width: 74, height: 74 };
+    case "tub":
+      return { width: 108, height: 58 };
+    case "stairs":
+      return { width: 116, height: 124 };
+    case "closet":
+      return { width: 96, height: 56 };
+    case "sofa":
+      return { width: 112, height: 64 };
+    case "bed":
+      return { width: 92, height: 128 };
+    case "table":
+      return { width: 84, height: 84 };
+  }
+}
+
 function useHtmlImage(src?: string) {
   const [image, setImage] = useState<HTMLImageElement | undefined>();
   useEffect(() => {
@@ -176,8 +202,10 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [structureSelection, setStructureSelection] = useState<StructureSelection | null>(null);
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Record<string, boolean>>({});
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [view, setView] = useState<"plan" | "media" | "three">("plan");
-  const [draftPrompts, setDraftPrompts] = useState<Record<string, string>>({});
+  const [activeMediaRoomId, setActiveMediaRoomId] = useState("");
+  const [activeMediaKind, setActiveMediaKind] = useState<"photos" | "renderOutputs">("photos");
   const [previewAsset, setPreviewAsset] = useState<{ asset: Asset; label: string } | null>(null);
   const [status, setStatus] = useState("Loading local workshop...");
   const [stageSize, setStageSize] = useState({ width: 1000, height: 720 });
@@ -297,6 +325,17 @@ function App() {
   }, [projects, structureSelection]);
 
   const backgroundImage = useHtmlImage(active.alternative?.plan.background?.dataUrl);
+
+  useEffect(() => {
+    const rooms = active.alternative?.plan.rooms ?? [];
+    if (rooms.length === 0) {
+      if (activeMediaRoomId) setActiveMediaRoomId("");
+      return;
+    }
+    if (!rooms.some((room) => room.id === activeMediaRoomId)) {
+      setActiveMediaRoomId(rooms[0].id);
+    }
+  }, [active.alternative?.id, active.alternative?.plan.rooms, activeMediaRoomId]);
 
   useEffect(() => {
     if (!backgroundImage || !active.alternative?.plan.background) return;
@@ -561,20 +600,30 @@ function App() {
   function gridLines() {
     const grid = active.alternative?.plan.scale.gridSize ?? 26;
     const lines = [];
-    const left = -viewport.x / viewport.scale - grid;
-    const top = -viewport.y / viewport.scale - grid;
-    const right = (stageSize.width - viewport.x) / viewport.scale + grid;
-    const bottom = (stageSize.height - viewport.y) / viewport.scale + grid;
-    const firstX = Math.floor(left / grid) * grid;
-    const firstY = Math.floor(top / grid) * grid;
-    for (let x = firstX; x < right; x += grid) {
+    const visibleLeft = -viewport.x / viewport.scale;
+    const visibleTop = -viewport.y / viewport.scale;
+    const visibleRight = (stageSize.width - viewport.x) / viewport.scale;
+    const visibleBottom = (stageSize.height - viewport.y) / viewport.scale;
+    for (let x = visibleLeft; x < visibleRight + grid; x += grid) {
       lines.push(
-        <Line key={`gx-${x}`} points={[x, top, x, bottom]} stroke="#dde2d9" strokeWidth={1} listening={false} />,
+        <Line
+          key={`gx-${x}`}
+          points={[x, visibleTop, x, visibleBottom]}
+          stroke="#dde2d9"
+          strokeWidth={1}
+          listening={false}
+        />,
       );
     }
-    for (let y = firstY; y < bottom; y += grid) {
+    for (let y = visibleTop; y < visibleBottom + grid; y += grid) {
       lines.push(
-        <Line key={`gy-${y}`} points={[left, y, right, y]} stroke="#dde2d9" strokeWidth={1} listening={false} />,
+        <Line
+          key={`gy-${y}`}
+          points={[visibleLeft, y, visibleRight, y]}
+          stroke="#dde2d9"
+          strokeWidth={1}
+          listening={false}
+        />,
       );
     }
     return lines;
@@ -724,14 +773,15 @@ function App() {
         setSelectedId(opening.id);
       }
       if (tool === "fixture") {
+        const size = defaultFixtureSize(fixtureKind);
         const fixture: Fixture = {
           id: uid("fixture"),
           kind: fixtureKind,
           name: fixtureLabels[fixtureKind],
           x: point.x,
           y: point.y,
-          width: fixtureKind === "counter" ? 130 : 64,
-          height: fixtureKind === "stairs" ? 130 : 52,
+          width: size.width,
+          height: size.height,
           rotation: 0,
         };
         plan.fixtures.push(fixture);
@@ -1062,14 +1112,19 @@ function App() {
     });
   }
 
-  function removeBoardPrompt(roomId: string, promptIndex: number) {
-    updateBoard(roomId, (board) => {
-      board.prompts = board.prompts.filter((_, index) => index !== promptIndex);
-    });
-  }
-
   const selection = selectedObject();
   const plan = active.alternative?.plan;
+  const activeMediaRoom = plan?.rooms.find((room) => room.id === activeMediaRoomId) ?? plan?.rooms[0];
+  const activeMediaBoard =
+    active.alternative && activeMediaRoom
+      ? active.alternative.roomBoards.find((item) => item.roomId === activeMediaRoom.id) ??
+        createRoomBoard(activeMediaRoom.id)
+      : undefined;
+  const activeMediaAssets =
+    activeMediaBoard && activeMediaKind === "photos" ? activeMediaBoard.photos : activeMediaBoard?.renderOutputs ?? [];
+  const activeMediaLabel = activeMediaKind === "photos" ? "Raw photo" : "Render";
+  const activeMediaEmptyLabel = activeMediaKind === "photos" ? "No raw photos yet" : "No renders yet";
+  const activeMediaUploadLabel = activeMediaKind === "photos" ? "Add raw photos" : "Add renders";
   const selectedRoom = selection && "kind" in selection && selection.kind === "room" ? (selection as Room) : undefined;
   const selectedRoomHeight = selectedRoom?.ceilingHeightMeters ?? plan?.scale.ceilingHeightMeters ?? 2.55;
   const selectedRoomWidthMeters =
@@ -1092,278 +1147,293 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+      <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand">
           <Home size={24} />
-          <div>
-            <strong>Renovation Planner</strong>
-            <span>{status}</span>
-          </div>
-        </div>
-
-        <SidebarSection
-          title="Project"
-          collapsed={Boolean(collapsedSections.project)}
-          onToggle={() => toggleSection("project")}
-        >
-          <div className="project-tree" aria-label="Project structure">
-            {projects.map((project) => {
-              const projectExpanded = isTreeNodeExpanded(project.id);
-              return (
-                <div className="tree-project" key={project.id}>
-                  <div className="tree-row tree-row-project">
-                    <button
-                      className="tree-disclosure"
-                      onClick={() => toggleTreeNode(project.id)}
-                      title={projectExpanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-                      aria-expanded={projectExpanded}
-                    >
-                      {projectExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </button>
-                    <button
-                      className={
-                        structureSelection?.type === "project" && structureSelection.id === project.id
-                          ? "tree-node active"
-                          : "tree-node"
-                      }
-                      onClick={() => selectProperty(project.id)}
-                    >
-                      <span>{project.name}</span>
-                      <small>{project.type}</small>
-                    </button>
-                    <button
-                      className="tree-action"
-                      onClick={() => addFloor(project.id)}
-                      title={`Add floor to ${project.name}`}
-                    >
-                      <Plus size={15} />
-                    </button>
-                  </div>
-
-                  {projectExpanded && (
-                    <div className="tree-children">
-                      {project.floors.map((floor) => {
-                        const floorExpanded = isTreeNodeExpanded(floor.id);
-                        return (
-                          <div className="tree-floor" key={floor.id}>
-                            <div className="tree-row tree-row-floor">
-                              <button
-                                className="tree-disclosure"
-                                onClick={() => toggleTreeNode(floor.id)}
-                                title={floorExpanded ? `Collapse ${floor.name}` : `Expand ${floor.name}`}
-                                aria-expanded={floorExpanded}
-                              >
-                                {floorExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                              </button>
-                              <button
-                                className={
-                                  structureSelection?.type === "floor" && structureSelection.id === floor.id
-                                    ? "tree-node active"
-                                    : "tree-node"
-                                }
-                                onClick={() => selectTreeFloor(project.id, floor.id)}
-                              >
-                                <span>{floor.name}</span>
-                                <small>{floor.alternatives.length} alt</small>
-                              </button>
-                              <button
-                                className="tree-action"
-                                onClick={() => addAlternative(project.id, floor.id)}
-                                title={`Duplicate alternative on ${floor.name}`}
-                              >
-                                <CopyPlus size={15} />
-                              </button>
-                              <button
-                                className="tree-action danger"
-                                onClick={() => deleteFloor(floor.id)}
-                                disabled={project.floors.length <= 1}
-                                title={
-                                  project.floors.length <= 1
-                                    ? "A project needs at least one floor"
-                                    : `Delete ${floor.name}`
-                                }
-                              >
-                                <Trash2 size={15} />
-                              </button>
-                            </div>
-
-                            {floorExpanded && (
-                              <div className="tree-children tree-children-alternatives">
-                                {floor.alternatives.map((alternative) => (
-                                  <div className="tree-row tree-row-alternative" key={alternative.id}>
-                                    <button
-                                      className={
-                                        structureSelection?.type === "alternative" &&
-                                        structureSelection.id === alternative.id
-                                          ? "tree-node active"
-                                          : "tree-node"
-                                      }
-                                      onClick={() => selectTreeAlternative(project.id, floor.id, alternative.id)}
-                                    >
-                                      <span>{alternative.name}</span>
-                                    </button>
-                                    <button
-                                      className="tree-action danger"
-                                      onClick={() => deleteAlternative(floor.id, alternative.id)}
-                                      disabled={floor.alternatives.length <= 1}
-                                      title={
-                                        floor.alternatives.length <= 1
-                                          ? "A floor needs at least one alternative"
-                                          : `Delete ${alternative.name}`
-                                      }
-                                    >
-                                      <Trash2 size={15} />
-                                    </button>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </SidebarSection>
-
-        <SidebarSection title="Tools" collapsed={Boolean(collapsedSections.tools)} onToggle={() => toggleSection("tools")}>
-          <div className="tool-stack">
-            {toolGroups.map((group) => (
-              <div className="tool-section" key={group.title}>
-                <div className="tool-section-title">{group.title}</div>
-                <div className="tool-grid">
-                  {group.items.map((item) => (
-                    <button
-                      key={item.mode}
-                      className={tool === item.mode ? "tool active" : "tool"}
-                      onClick={() => {
-                        if (item.mode !== "polyRoom") setPolygonDraft([]);
-                        if (item.mode !== "calibrate") setCalibrationPoints([]);
-                        setTool(item.mode);
-                      }}
-                      title={item.label}
-                    >
-                      {item.icon}
-                      <span>{item.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {tool === "fixture" && (
-            <div className="field">
-              <label>Fixture</label>
-              <select value={fixtureKind} onChange={(event) => setFixtureKind(event.target.value as FixtureKind)}>
-                {fixtureKinds.map((kind) => (
-                  <option key={kind} value={kind}>
-                    {fixtureLabels[kind]}
-                  </option>
-                ))}
-              </select>
+          {!sidebarCollapsed && (
+            <div className="brand-copy">
+              <strong>Renovation Planner</strong>
+              <span>{status}</span>
             </div>
           )}
-        </SidebarSection>
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            type="button"
+            aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
+        </div>
 
-        <SidebarSection
-          title="Floorplan"
-          collapsed={Boolean(collapsedSections.floorplan)}
-          onToggle={() => toggleSection("floorplan")}
-        >
-          <div className="file-actions">
-            <button onClick={() => importRef.current?.click()}>
-              <Upload size={17} />
-              Upload plan
-            </button>
-            <button onClick={toggleBackgroundVisibility} disabled={!plan?.background}>
-              {plan?.scale.backgroundVisible === false ? <Eye size={17} /> : <EyeOff size={17} />}
-              {plan?.scale.backgroundVisible === false ? "Show plan" : "Hide plan"}
-            </button>
-          </div>
+        {!sidebarCollapsed && (
+          <>
+            <SidebarSection
+              title="Project"
+              collapsed={Boolean(collapsedSections.project)}
+              onToggle={() => toggleSection("project")}
+            >
+              <div className="project-tree" aria-label="Project structure">
+                {projects.map((project) => {
+                  const projectExpanded = isTreeNodeExpanded(project.id);
+                  return (
+                    <div className="tree-project" key={project.id}>
+                      <div className="tree-row tree-row-project">
+                        <button
+                          className="tree-disclosure"
+                          onClick={() => toggleTreeNode(project.id)}
+                          title={projectExpanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
+                          aria-expanded={projectExpanded}
+                        >
+                          {projectExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                        <button
+                          className={
+                            structureSelection?.type === "project" && structureSelection.id === project.id
+                              ? "tree-node active"
+                              : "tree-node"
+                          }
+                          onClick={() => selectProperty(project.id)}
+                        >
+                          <span>{project.name}</span>
+                          <small>{project.type}</small>
+                        </button>
+                        <button
+                          className="tree-action"
+                          onClick={() => addFloor(project.id)}
+                          title={`Add floor to ${project.name}`}
+                        >
+                          <Plus size={15} />
+                        </button>
+                      </div>
 
-          <div className="scale-panel">
-            <label>
-              Pixels / meter
-              <input
-                type="number"
-                min={10}
-                value={plan?.scale.pixelsPerMeter ?? 52}
-                onChange={(event) =>
-                  updateAlternative((alternative) => {
-                    alternative.plan.scale.pixelsPerMeter = Number(event.target.value);
-                  })
-                }
-              />
-            </label>
-            <label>
-              Grid size
-              <input
-                type="number"
-                min={8}
-                value={plan?.scale.gridSize ?? 26}
-                onChange={(event) =>
-                  updateAlternative((alternative) => {
-                    alternative.plan.scale.gridSize = Number(event.target.value);
-                  })
-                }
-              />
-            </label>
-          </div>
+                      {projectExpanded && (
+                        <div className="tree-children">
+                          {project.floors.map((floor) => {
+                            const floorExpanded = isTreeNodeExpanded(floor.id);
+                            return (
+                              <div className="tree-floor" key={floor.id}>
+                                <div className="tree-row tree-row-floor">
+                                  <button
+                                    className="tree-disclosure"
+                                    onClick={() => toggleTreeNode(floor.id)}
+                                    title={floorExpanded ? `Collapse ${floor.name}` : `Expand ${floor.name}`}
+                                    aria-expanded={floorExpanded}
+                                  >
+                                    {floorExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                  </button>
+                                  <button
+                                    className={
+                                      structureSelection?.type === "floor" && structureSelection.id === floor.id
+                                        ? "tree-node active"
+                                        : "tree-node"
+                                    }
+                                    onClick={() => selectTreeFloor(project.id, floor.id)}
+                                  >
+                                    <span>{floor.name}</span>
+                                    <small>{floor.alternatives.length} alt</small>
+                                  </button>
+                                  <button
+                                    className="tree-action"
+                                    onClick={() => addAlternative(project.id, floor.id)}
+                                    title={`Duplicate alternative on ${floor.name}`}
+                                  >
+                                    <CopyPlus size={15} />
+                                  </button>
+                                  <button
+                                    className="tree-action danger"
+                                    onClick={() => deleteFloor(floor.id)}
+                                    disabled={project.floors.length <= 1}
+                                    title={
+                                      project.floors.length <= 1
+                                        ? "A project needs at least one floor"
+                                        : `Delete ${floor.name}`
+                                    }
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </div>
 
-          <div className="calibration-panel">
-            <div>
-              <strong>Scale calibration</strong>
-              <span>
-                {calibrationPoints.length === 0
-                  ? "Click two known points on the floorplan."
-                  : calibrationPoints.length === 1
-                    ? "Click the second point."
-                    : `${calibrationPixelDistance().toFixed(0)} px selected.`}
-              </span>
-            </div>
-            <label>
-              Known distance (m)
-              <input
-                type="number"
-                min={0.01}
-                step={0.01}
-                value={calibrationMeters}
-                onChange={(event) => setCalibrationMeters(event.target.value)}
-              />
-            </label>
-            <div className="calibration-actions">
-              <button onClick={() => setTool("calibrate")}>
-                <Ruler size={16} />
-                Pick points
-              </button>
-              <button onClick={applyCalibration} disabled={calibrationPoints.length !== 2}>
-                Apply
-              </button>
-            </div>
-          </div>
-        </SidebarSection>
+                                {floorExpanded && (
+                                  <div className="tree-children tree-children-alternatives">
+                                    {floor.alternatives.map((alternative) => (
+                                      <div className="tree-row tree-row-alternative" key={alternative.id}>
+                                        <button
+                                          className={
+                                            structureSelection?.type === "alternative" &&
+                                            structureSelection.id === alternative.id
+                                              ? "tree-node active"
+                                              : "tree-node"
+                                          }
+                                          onClick={() => selectTreeAlternative(project.id, floor.id, alternative.id)}
+                                        >
+                                          <span>{alternative.name}</span>
+                                        </button>
+                                        <button
+                                          className="tree-action danger"
+                                          onClick={() => deleteAlternative(floor.id, alternative.id)}
+                                          disabled={floor.alternatives.length <= 1}
+                                          title={
+                                            floor.alternatives.length <= 1
+                                              ? "A floor needs at least one alternative"
+                                              : `Delete ${alternative.name}`
+                                          }
+                                        >
+                                          <Trash2 size={15} />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </SidebarSection>
 
-        <SidebarSection
-          title="Project Data"
-          collapsed={Boolean(collapsedSections.data)}
-          onToggle={() => toggleSection("data")}
-        >
-          <div className="file-actions">
-            <button onClick={() => downloadJson(projects)}>
-              <Download size={17} />
-              Export
-            </button>
-            <button onClick={() => jsonImportRef.current?.click()}>
-              <Import size={17} />
-              Import
-            </button>
-          </div>
-        </SidebarSection>
+            <SidebarSection title="Tools" collapsed={Boolean(collapsedSections.tools)} onToggle={() => toggleSection("tools")}>
+              <div className="tool-stack">
+                {toolGroups.map((group) => (
+                  <div className="tool-section" key={group.title}>
+                    <div className="tool-section-title">{group.title}</div>
+                    <div className="tool-grid">
+                      {group.items.map((item) => (
+                        <button
+                          key={item.mode}
+                          className={tool === item.mode ? "tool active" : "tool"}
+                          onClick={() => {
+                            if (item.mode !== "polyRoom") setPolygonDraft([]);
+                            if (item.mode !== "calibrate") setCalibrationPoints([]);
+                            setTool(item.mode);
+                          }}
+                          title={item.label}
+                        >
+                          {item.icon}
+                          <span>{item.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {tool === "fixture" && (
+                <div className="field">
+                  <label>Fixture</label>
+                  <select value={fixtureKind} onChange={(event) => setFixtureKind(event.target.value as FixtureKind)}>
+                    {fixtureKinds.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {fixtureLabels[kind]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </SidebarSection>
+
+            <SidebarSection
+              title="Floorplan"
+              collapsed={Boolean(collapsedSections.floorplan)}
+              onToggle={() => toggleSection("floorplan")}
+            >
+              <div className="file-actions">
+                <button onClick={() => importRef.current?.click()}>
+                  <Upload size={17} />
+                  Upload plan
+                </button>
+                <button onClick={toggleBackgroundVisibility} disabled={!plan?.background}>
+                  {plan?.scale.backgroundVisible === false ? <Eye size={17} /> : <EyeOff size={17} />}
+                  {plan?.scale.backgroundVisible === false ? "Show plan" : "Hide plan"}
+                </button>
+              </div>
+
+              <div className="scale-panel">
+                <label>
+                  Pixels / meter
+                  <input
+                    type="number"
+                    min={10}
+                    value={plan?.scale.pixelsPerMeter ?? 52}
+                    onChange={(event) =>
+                      updateAlternative((alternative) => {
+                        alternative.plan.scale.pixelsPerMeter = Number(event.target.value);
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Grid size
+                  <input
+                    type="number"
+                    min={8}
+                    value={plan?.scale.gridSize ?? 26}
+                    onChange={(event) =>
+                      updateAlternative((alternative) => {
+                        alternative.plan.scale.gridSize = Number(event.target.value);
+                      })
+                    }
+                  />
+                </label>
+              </div>
+
+              <div className="calibration-panel">
+                <div>
+                  <strong>Scale calibration</strong>
+                  <span>
+                    {calibrationPoints.length === 0
+                      ? "Click two known points on the floorplan."
+                      : calibrationPoints.length === 1
+                        ? "Click the second point."
+                        : `${calibrationPixelDistance().toFixed(0)} px selected.`}
+                  </span>
+                </div>
+                <label>
+                  Known distance (m)
+                  <input
+                    type="number"
+                    min={0.01}
+                    step={0.01}
+                    value={calibrationMeters}
+                    onChange={(event) => setCalibrationMeters(event.target.value)}
+                  />
+                </label>
+                <div className="calibration-actions">
+                  <button onClick={() => setTool("calibrate")}>
+                    <Ruler size={16} />
+                    Pick points
+                  </button>
+                  <button onClick={applyCalibration} disabled={calibrationPoints.length !== 2}>
+                    Apply
+                  </button>
+                </div>
+              </div>
+            </SidebarSection>
+
+            <SidebarSection
+              title="Project Data"
+              collapsed={Boolean(collapsedSections.data)}
+              onToggle={() => toggleSection("data")}
+            >
+              <div className="file-actions">
+                <button onClick={() => downloadJson(projects)}>
+                  <Download size={17} />
+                  Export
+                </button>
+                <button onClick={() => jsonImportRef.current?.click()}>
+                  <Import size={17} />
+                  Import
+                </button>
+              </div>
+            </SidebarSection>
+          </>
+        )}
         <input
           hidden
           ref={importRef}
@@ -1408,13 +1478,13 @@ function App() {
           <div className="planner-layout">
             <div className="canvas-shell" ref={canvasShellRef}>
               <div className="canvas-controls">
-                <button onClick={() => zoomCanvas(viewport.scale * 1.15)} title="Zoom in">
+                <button onClick={() => zoomCanvas(viewport.scale * 1.15)} aria-label="Zoom in">
                   <ZoomIn size={16} />
                 </button>
-                <button onClick={() => zoomCanvas(viewport.scale / 1.15)} title="Zoom out">
+                <button onClick={() => zoomCanvas(viewport.scale / 1.15)} aria-label="Zoom out">
                   <ZoomOut size={16} />
                 </button>
-                <button onClick={resetCanvasView} title="Reset view">
+                <button onClick={resetCanvasView} aria-label="Reset view">
                   <Maximize2 size={16} />
                 </button>
                 <span>{Math.round(viewport.scale * 100)}%</span>
@@ -1690,22 +1760,7 @@ function App() {
                         moveRectangularObject(fixture.id, event.currentTarget.x(), event.currentTarget.y(), event.evt.altKey);
                       }}
                     >
-                      <Rect
-                        width={fixture.width}
-                        height={fixture.height}
-                        fill="#fffdf7"
-                        stroke={selectedId === fixture.id ? "#242a27" : "#7a8379"}
-                        strokeWidth={selectedId === fixture.id ? 3 : 1.5}
-                        cornerRadius={fixture.kind === "sink" || fixture.kind === "toilet" ? 16 : 4}
-                      />
-                      <Text
-                        x={8}
-                        y={8}
-                        text={fixtureLabels[fixture.kind]}
-                        fontSize={12}
-                        fill="#303732"
-                        listening={false}
-                      />
+                      <PlanFixtureGlyph fixture={fixture} selected={selectedId === fixture.id} />
                     </Group>
                   ))}
                   {polygonDraft.length > 0 && (
@@ -2003,83 +2058,105 @@ function App() {
               <div className="empty-wide">
                 <ImagePlus size={36} />
                 <h2>Add rooms in the plan view first</h2>
-                <p>Each room gets a board for original photos, generated renders, prompts, and renovation notes.</p>
+                <p>Each room gets a focused board for raw photos, renders, and renovation notes.</p>
               </div>
             )}
-            {plan.rooms.map((room) => {
-              const board = active.alternative!.roomBoards.find((item) => item.roomId === room.id) ?? createRoomBoard(room.id);
-              const draftPrompt = draftPrompts[room.id] ?? "";
-              return (
-                <section className="room-board" key={room.id}>
+            {activeMediaRoom && activeMediaBoard && (
+              <div className="room-workbook">
+                <aside className="room-rail" aria-label="Rooms">
+                  <header>
+                    <span>Rooms</span>
+                    <strong>{plan.rooms.length}</strong>
+                  </header>
+                  <div className="room-rail-list">
+                    {plan.rooms.map((room) => {
+                      const board =
+                        active.alternative!.roomBoards.find((item) => item.roomId === room.id) ??
+                        createRoomBoard(room.id);
+                      const isActive = room.id === activeMediaRoom.id;
+                      return (
+                        <button
+                          className={isActive ? "room-rail-item active" : "room-rail-item"}
+                          key={room.id}
+                          onClick={() => {
+                            setActiveMediaRoomId(room.id);
+                            setSelectedId(room.id);
+                          }}
+                        >
+                          <span className="room-rail-color" style={{ background: room.color }} />
+                          <span className="room-rail-copy">
+                            <strong>{room.name}</strong>
+                            <small>{roomArea(room, plan.scale.pixelsPerMeter).toFixed(1)} m2</small>
+                          </span>
+                          <span className="room-rail-counts">
+                            <span>{board.photos.length} raw</span>
+                            <span>{board.renderOutputs.length} renders</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </aside>
+
+                <section
+                  className="room-board room-board-focused"
+                  style={{ "--room-color": activeMediaRoom.color } as CSSProperties}
+                >
                   <header>
                     <div>
-                      <h2>{room.name}</h2>
-                      <p>{roomArea(room, plan.scale.pixelsPerMeter).toFixed(1)} m2</p>
+                      <h2>{activeMediaRoom.name}</h2>
+                      <p>
+                        {roomArea(activeMediaRoom, plan.scale.pixelsPerMeter).toFixed(1)} m2 ·{" "}
+                        {activeMediaBoard.photos.length} raw · {activeMediaBoard.renderOutputs.length} renders
+                      </p>
                     </div>
-                    <span style={{ background: room.color }} />
                   </header>
-                  <div className="room-board-tools">
-                    <MediaUpload
-                      title="Add photos"
-                      count={board.photos.length}
-                      onFiles={(files) => addBoardAssets(room.id, "photos", files)}
-                    />
-                    <MediaUpload
-                      title="Add renders"
-                      count={board.renderOutputs.length}
-                      onFiles={(files) => addBoardAssets(room.id, "renderOutputs", files)}
-                    />
-                  </div>
-                  <RoomGallery
-                    photos={board.photos}
-                    renderOutputs={board.renderOutputs}
-                    onOpenAsset={(asset, label) => setPreviewAsset({ asset, label })}
-                    onRemovePhoto={(assetId) => removeBoardAsset(room.id, "photos", assetId)}
-                    onRemoveRender={(assetId) => removeBoardAsset(room.id, "renderOutputs", assetId)}
-                  />
-                  <div className="prompt-panel">
-                    <label>
-                      Prompt ideas
-                      <textarea
-                        value={draftPrompt}
-                        placeholder="Example: brighten this kitchen, keep the same layout, add warm oak cabinets..."
-                        onChange={(event) =>
-                          setDraftPrompts((current) => ({ ...current, [room.id]: event.target.value }))
-                        }
+
+                  <section className="media-stage">
+                    <header>
+                      <div className="media-switcher" aria-label="Room media type">
+                        <button
+                          className={activeMediaKind === "photos" ? "active" : ""}
+                          onClick={() => setActiveMediaKind("photos")}
+                          type="button"
+                        >
+                          Raw photos
+                          <span>{activeMediaBoard.photos.length}</span>
+                        </button>
+                        <button
+                          className={activeMediaKind === "renderOutputs" ? "active" : ""}
+                          onClick={() => setActiveMediaKind("renderOutputs")}
+                          type="button"
+                        >
+                          Renders
+                          <span>{activeMediaBoard.renderOutputs.length}</span>
+                        </button>
+                      </div>
+                      <MediaUploadAction
+                        label={activeMediaUploadLabel}
+                        onFiles={(files) => addBoardAssets(activeMediaRoom.id, activeMediaKind, files)}
                       />
-                    </label>
-                    <button
-                      onClick={() => {
-                        if (!draftPrompt.trim()) return;
-                        updateBoard(room.id, (item) => item.prompts.unshift(draftPrompt.trim()));
-                        setDraftPrompts((current) => ({ ...current, [room.id]: "" }));
-                      }}
-                    >
-                      <WandSparkles size={17} />
-                      Save prompt
-                    </button>
-                    <div className="prompt-list">
-                      {board.prompts.map((prompt, index) => (
-                        <div className="prompt-item" key={`${room.id}-prompt-${index}`}>
-                          <p>{prompt}</p>
-                          <button onClick={() => removeBoardPrompt(room.id, index)} title="Remove prompt">
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                    </header>
+                    <RoomGallery
+                      assets={activeMediaAssets}
+                      label={activeMediaLabel}
+                      emptyLabel={activeMediaEmptyLabel}
+                      onOpenAsset={(asset, label) => setPreviewAsset({ asset, label })}
+                      onRemoveAsset={(assetId) => removeBoardAsset(activeMediaRoom.id, activeMediaKind, assetId)}
+                    />
+                  </section>
+
                   <label className="notes">
                     Notes
                     <textarea
-                      value={board.notes}
-                      onChange={(event) => updateBoard(room.id, (item) => (item.notes = event.target.value))}
-                      placeholder="Materials, things to keep, measurements to check, shopping ideas..."
+                      value={activeMediaBoard.notes}
+                      onChange={(event) => updateBoard(activeMediaRoom.id, (item) => (item.notes = event.target.value))}
+                      placeholder="Measurements, materials, things to keep, decisions to revisit..."
                     />
                   </label>
                 </section>
-              );
-            })}
+              </div>
+            )}
           </div>
         )}
 
@@ -2109,28 +2186,321 @@ function App() {
   );
 }
 
-function MediaUpload({
-  title,
-  count,
-  onFiles,
-}: {
-  title: string;
-  count: number;
-  onFiles: (files: FileList | null) => void;
-}) {
+function PlanFixtureGlyph({ fixture, selected }: { fixture: Fixture; selected: boolean }) {
+  const { width, height } = fixture;
+  const stroke = selected ? "#242a27" : "#66756d";
+  const strokeWidth = selected ? 2.5 : 1.5;
+  const fill = "#fffdf7";
+  const accent = "#d6e4dd";
+  const detail = "#4c5c54";
+  const labelY = Math.max(4, height - 14);
+
+  const label = (
+    <Text
+      x={4}
+      y={labelY}
+      width={Math.max(0, width - 8)}
+      text={fixtureLabels[fixture.kind]}
+      fontSize={9}
+      fontStyle="bold"
+      align="center"
+      fill="#303732"
+      listening={false}
+    />
+  );
+
+  let glyph: JSX.Element;
+  switch (fixture.kind) {
+    case "counter":
+      glyph = (
+        <>
+          <Line points={[12, height * 0.5, width - 12, height * 0.5]} stroke={detail} strokeWidth={1.2} listening={false} />
+          {[0.33, 0.66].map((ratio) => (
+            <Line
+              key={ratio}
+              points={[width * ratio, 9, width * ratio, height - 9]}
+              stroke={detail}
+              strokeWidth={1}
+              listening={false}
+            />
+          ))}
+          <Ellipse
+            x={width * 0.83}
+            y={height * 0.5}
+            radiusX={Math.max(8, width * 0.08)}
+            radiusY={Math.max(6, height * 0.2)}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1}
+            listening={false}
+          />
+        </>
+      );
+      break;
+    case "sink":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.18}
+            y={height * 0.16}
+            width={width * 0.64}
+            height={height * 0.54}
+            cornerRadius={10}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.2}
+            listening={false}
+          />
+          <Ellipse
+            x={width * 0.5}
+            y={height * 0.43}
+            radiusX={width * 0.21}
+            radiusY={height * 0.17}
+            fill={fill}
+            stroke={detail}
+            strokeWidth={1}
+            listening={false}
+          />
+          <Line
+            points={[width * 0.5, height * 0.2, width * 0.5, height * 0.3, width * 0.58, height * 0.3]}
+            stroke={detail}
+            strokeWidth={1.4}
+            lineCap="round"
+            lineJoin="round"
+            listening={false}
+          />
+        </>
+      );
+      break;
+    case "toilet":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.2}
+            y={height * 0.1}
+            width={width * 0.6}
+            height={height * 0.2}
+            cornerRadius={4}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.2}
+            listening={false}
+          />
+          <Line points={[width * 0.5, height * 0.3, width * 0.5, height * 0.38]} stroke={detail} strokeWidth={1} listening={false} />
+          <Ellipse
+            x={width * 0.5}
+            y={height * 0.53}
+            radiusX={width * 0.28}
+            radiusY={height * 0.2}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.3}
+            listening={false}
+          />
+          <Ellipse
+            x={width * 0.5}
+            y={height * 0.53}
+            radiusX={width * 0.13}
+            radiusY={height * 0.09}
+            fill={fill}
+            stroke={detail}
+            strokeWidth={0.9}
+            listening={false}
+          />
+        </>
+      );
+      break;
+    case "shower":
+      glyph = (
+        <>
+          <Line points={[10, height - 10, width - 10, 10]} stroke={detail} strokeWidth={1.2} listening={false} />
+          <Circle x={width * 0.72} y={height * 0.72} radius={4} fill={detail} listening={false} />
+          <Line
+            points={[width * 0.22, height * 0.2, width * 0.34, height * 0.2, width * 0.34, height * 0.32]}
+            stroke={detail}
+            strokeWidth={1.3}
+            lineCap="round"
+            lineJoin="round"
+            listening={false}
+          />
+          <Circle x={width * 0.37} y={height * 0.35} radius={4} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
+        </>
+      );
+      break;
+    case "tub":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.08}
+            y={height * 0.2}
+            width={width * 0.84}
+            height={height * 0.44}
+            cornerRadius={16}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.3}
+            listening={false}
+          />
+          <Ellipse
+            x={width * 0.5}
+            y={height * 0.42}
+            radiusX={width * 0.32}
+            radiusY={height * 0.14}
+            fill={fill}
+            stroke={detail}
+            strokeWidth={0.9}
+            listening={false}
+          />
+          <Circle x={width * 0.18} y={height * 0.25} radius={3} fill={detail} listening={false} />
+          <Circle x={width * 0.24} y={height * 0.25} radius={3} fill={detail} listening={false} />
+        </>
+      );
+      break;
+    case "stairs":
+      glyph = (
+        <>
+          {[1, 2, 3, 4, 5, 6].map((step) => {
+            const y = (height * step) / 7;
+            return (
+              <Line
+                key={step}
+                points={[12, y, width - 12, y]}
+                stroke={detail}
+                strokeWidth={1.2}
+                listening={false}
+              />
+            );
+          })}
+          <Line points={[width * 0.24, height - 16, width * 0.76, 16]} stroke={detail} strokeWidth={1.4} listening={false} />
+        </>
+      );
+      break;
+    case "closet":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.1}
+            y={height * 0.18}
+            width={width * 0.8}
+            height={height * 0.5}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.2}
+            listening={false}
+          />
+          <Line points={[width * 0.5, height * 0.18, width * 0.5, height * 0.68]} stroke={detail} strokeWidth={1} listening={false} />
+          <Circle x={width * 0.45} y={height * 0.43} radius={2.5} fill={detail} listening={false} />
+          <Circle x={width * 0.55} y={height * 0.43} radius={2.5} fill={detail} listening={false} />
+        </>
+      );
+      break;
+    case "sofa":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.12}
+            y={height * 0.2}
+            width={width * 0.76}
+            height={height * 0.24}
+            cornerRadius={8}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.2}
+            listening={false}
+          />
+          <Rect
+            x={width * 0.08}
+            y={height * 0.4}
+            width={width * 0.84}
+            height={height * 0.24}
+            cornerRadius={8}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.2}
+            listening={false}
+          />
+          <Line points={[width * 0.5, height * 0.41, width * 0.5, height * 0.63]} stroke={detail} strokeWidth={1} listening={false} />
+          <Rect x={width * 0.04} y={height * 0.36} width={width * 0.1} height={height * 0.3} cornerRadius={4} fill={detail} listening={false} />
+          <Rect x={width * 0.86} y={height * 0.36} width={width * 0.1} height={height * 0.3} cornerRadius={4} fill={detail} listening={false} />
+        </>
+      );
+      break;
+    case "bed":
+      glyph = (
+        <>
+          <Rect
+            x={width * 0.12}
+            y={height * 0.12}
+            width={width * 0.76}
+            height={height * 0.72}
+            cornerRadius={6}
+            fill={accent}
+            stroke={detail}
+            strokeWidth={1.3}
+            listening={false}
+          />
+          <Rect
+            x={width * 0.2}
+            y={height * 0.18}
+            width={width * 0.6}
+            height={height * 0.18}
+            cornerRadius={5}
+            fill={fill}
+            stroke={detail}
+            strokeWidth={1}
+            listening={false}
+          />
+          <Line points={[width * 0.12, height * 0.43, width * 0.88, height * 0.43]} stroke={detail} strokeWidth={1} listening={false} />
+          <Line points={[width * 0.5, height * 0.43, width * 0.5, height * 0.84]} stroke={detail} strokeWidth={0.9} listening={false} />
+        </>
+      );
+      break;
+    case "table":
+      glyph = (
+        <>
+          <Rect x={width * 0.38} y={height * 0.04} width={width * 0.24} height={height * 0.12} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
+          <Rect x={width * 0.38} y={height * 0.84} width={width * 0.24} height={height * 0.12} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
+          <Rect x={width * 0.04} y={height * 0.38} width={width * 0.12} height={height * 0.24} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
+          <Rect x={width * 0.84} y={height * 0.38} width={width * 0.12} height={height * 0.24} cornerRadius={3} fill={accent} stroke={detail} strokeWidth={1} listening={false} />
+          <Ellipse
+            x={width * 0.5}
+            y={height * 0.5}
+            radiusX={width * 0.3}
+            radiusY={height * 0.24}
+            fill={fill}
+            stroke={detail}
+            strokeWidth={1.3}
+            listening={false}
+          />
+        </>
+      );
+      break;
+  }
+
+  return (
+    <>
+      <Rect
+        width={width}
+        height={height}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        cornerRadius={fixture.kind === "sink" || fixture.kind === "toilet" || fixture.kind === "table" ? 14 : 5}
+      />
+      {glyph}
+      {label}
+    </>
+  );
+}
+
+function MediaUploadAction({ label, onFiles }: { label: string; onFiles: (files: FileList | null) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
-    <div className="media-upload">
-      <header>
-        <div>
-          <h3>{title}</h3>
-          <p>{count} saved</p>
-        </div>
-        <button onClick={() => inputRef.current?.click()}>
-          <ImagePlus size={16} />
-          Add
-        </button>
-      </header>
+    <>
+      <button className="media-upload-action" onClick={() => inputRef.current?.click()} type="button">
+        <ImagePlus size={16} />
+        {label}
+      </button>
       <input
         hidden
         ref={inputRef}
@@ -2142,40 +2512,35 @@ function MediaUpload({
           event.currentTarget.value = "";
         }}
       />
-    </div>
+    </>
   );
 }
 
 function RoomGallery({
-  photos,
-  renderOutputs,
+  assets,
+  label,
+  emptyLabel,
   onOpenAsset,
-  onRemovePhoto,
-  onRemoveRender,
+  onRemoveAsset,
 }: {
-  photos: Asset[];
-  renderOutputs: Asset[];
+  assets: Asset[];
+  label: string;
+  emptyLabel: string;
   onOpenAsset: (asset: Asset, label: string) => void;
-  onRemovePhoto: (assetId: string) => void;
-  onRemoveRender: (assetId: string) => void;
+  onRemoveAsset: (assetId: string) => void;
 }) {
-  const galleryItems = [
-    ...photos.map((asset) => ({ asset, label: "Photo", onRemove: onRemovePhoto })),
-    ...renderOutputs.map((asset) => ({ asset, label: "Render", onRemove: onRemoveRender })),
-  ];
-
-  if (galleryItems.length === 0) {
+  if (assets.length === 0) {
     return (
       <div className="gallery-empty">
         <Camera size={24} />
-        <p>No room pictures yet</p>
+        <p>{emptyLabel}</p>
       </div>
     );
   }
 
   return (
     <div className="room-gallery">
-      {galleryItems.map(({ asset, label, onRemove }, index) => (
+      {assets.map((asset, index) => (
         <figure
           className={index === 0 ? "gallery-card featured" : "gallery-card"}
           key={asset.id}
@@ -2196,7 +2561,7 @@ function RoomGallery({
           <button
             onClick={(event) => {
               event.stopPropagation();
-              onRemove(asset.id);
+              onRemoveAsset(asset.id);
             }}
             title={`Remove ${asset.name}`}
           >
