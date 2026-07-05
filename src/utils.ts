@@ -86,6 +86,18 @@ export function metersFromPixels(pixels: number, pixelsPerMeter: number) {
   return pixels / pixelsPerMeter;
 }
 
+export function centimetersFromPixels(pixels: number, pixelsPerMeter: number) {
+  return metersFromPixels(pixels, pixelsPerMeter) * 100;
+}
+
+export function pixelsFromCentimeters(centimeters: number, pixelsPerMeter: number) {
+  return (centimeters / 100) * pixelsPerMeter;
+}
+
+export function formatCentimeters(centimeters: number) {
+  return `${Math.round(centimeters)} cm`;
+}
+
 export function rectangleRoomPoints(room: { width: number; height: number }): PlanPoint[] {
   return [
     { x: 0, y: 0 },

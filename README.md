@@ -64,6 +64,8 @@ src/
   ThreePreview.tsx        Lazy-loaded 3D preview component
   three/
     planToWorld.ts        Shared 2D plan to 3D world transform
+    sceneBuilder.ts       Converts planner data into a Three.js scene graph
+    wallGeometry.ts       Builds wall segments, door gaps, and window panes
   components/
     MediaUploadAction.tsx
     PlanFixtureGlyph.tsx
@@ -77,7 +79,7 @@ src/
 
 - `model.ts` owns shared domain helpers and safe scale accessors.
 - `geometry.ts` owns pure 2D plan geometry.
-- `three/planToWorld.ts` is the first dedicated 3D boundary.
+- `three/` contains the first dedicated 3D boundary: transform math, scene assembly, and wall/opening geometry.
 - PDF and 3D code are lazy-loaded to keep the initial app bundle smaller.
 
 The next useful refactor is to split planner state/actions and canvas rendering into smaller modules before adding heavier 3D features.
@@ -87,8 +89,8 @@ The next useful refactor is to split planner state/actions and canvas rendering 
 The current 3D view is a preview, not yet a full geometry engine. The intended direction is:
 
 - centralize plan-to-world conversion
-- move scene construction into a dedicated scene builder
-- replace simple door/window preview blocks with real wall openings
+- keep scene construction in a dedicated scene builder
+- replace simple door/window preview blocks with real wall/opening geometry
 - support richer room, fixture, camera, and selection behavior in 3D
 
 ## Persistence

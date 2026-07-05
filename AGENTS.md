@@ -32,6 +32,8 @@ Always run `npm run build` after code changes unless the user explicitly asks fo
 - `src/pdf.ts`: PDF import helper; keep lazy-loaded from UI paths.
 - `src/ThreePreview.tsx`: lazy-loaded 3D preview.
 - `src/three/planToWorld.ts`: shared 2D plan to 3D transform.
+- `src/three/sceneBuilder.ts`: assembles the Three.js scene graph from planner data.
+- `src/three/wallGeometry.ts`: builds wall segments around doors/windows.
 - `src/components/`: reusable UI leaf components.
 
 ## Development Guidelines

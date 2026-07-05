@@ -1,16 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import type { Plan } from "./types";
-import { createPlanToWorldTransform } from "./three/planToWorld";
-import { roomPoints } from "./utils";
-
-function rotatedRectCenter(rect: { x: number; y: number; width: number; height: number; rotation: number }) {
-  const radians = (rect.rotation * Math.PI) / 180;
-  return {
-    x: rect.x + Math.cos(radians) * (rect.width / 2) - Math.sin(radians) * (rect.height / 2),
-    y: rect.y + Math.sin(radians) * (rect.width / 2) + Math.cos(radians) * (rect.height / 2),
-  };
-}
+import { buildPlanScene } from "./three/sceneBuilder";
 
 function ThreePreview({ plan }: { plan: Plan }) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -42,68 +33,7 @@ function ThreePreview({ plan }: { plan: Plan }) {
     sun.castShadow = true;
     scene.add(sun);
 
-    const height = plan.scale.ceilingHeightMeters * 24;
-    const transform = createPlanToWorldTransform();
-
-    const wallMat = new THREE.MeshStandardMaterial({ color: "#fffdf7", roughness: 0.65 });
-    const fixtureMat = new THREE.MeshStandardMaterial({ color: "#7a8379", roughness: 0.55 });
-
-    plan.rooms.forEach((room) => {
-      const points = roomPoints(room);
-      const shape = new THREE.Shape(
-        points.map((point) => {
-          const worldPoint = transform.point({ x: room.x + point.x, y: room.y + point.y });
-          return new THREE.Vector2(worldPoint.x, worldPoint.z);
-        }),
-      );
-      const geometry = new THREE.ExtrudeGeometry(shape, { depth: 2, bevelEnabled: false });
-      const floorMat = new THREE.MeshStandardMaterial({ color: room.color || "#e4dac8", roughness: 0.88 });
-      const mesh = new THREE.Mesh(geometry, floorMat);
-      mesh.rotation.x = Math.PI / 2;
-      mesh.position.y = 0;
-      scene.add(mesh);
-    });
-
-    plan.walls.forEach((wall) => {
-      const dx = wall.x2 - wall.x;
-      const dy = wall.y2 - wall.y;
-      const length = transform.length(Math.hypot(dx, dy));
-      const thickness = Math.max(transform.length(wall.thickness), 5);
-      const geometry = new THREE.BoxGeometry(length, height, thickness);
-      const mesh = new THREE.Mesh(geometry, wallMat);
-      const mid = transform.point({ x: (wall.x + wall.x2) / 2, y: (wall.y + wall.y2) / 2 });
-      mesh.position.set(mid.x, height / 2, mid.z);
-      mesh.rotation.y = -Math.atan2(dy, dx);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      scene.add(mesh);
-    });
-
-    plan.openings.forEach((opening) => {
-      const center = rotatedRectCenter(opening);
-      const pos = transform.point(center);
-      const geometry = new THREE.BoxGeometry(transform.length(opening.width), opening.kind === "door" ? height * 0.72 : height * 0.36, 4);
-      const material = new THREE.MeshStandardMaterial({
-        color: opening.kind === "door" ? "#d8b45a" : "#9fc7d0",
-        transparent: opening.kind === "window",
-        opacity: opening.kind === "window" ? 0.55 : 1,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(pos.x, opening.kind === "door" ? height * 0.36 : height * 0.58, pos.z);
-      mesh.rotation.y = transform.rotation(opening.rotation);
-      scene.add(mesh);
-    });
-
-    plan.fixtures.forEach((fixture) => {
-      const center = rotatedRectCenter(fixture);
-      const pos = transform.point(center);
-      const fixtureHeight = fixture.kind === "stairs" ? 26 : fixture.kind === "counter" ? 20 : 14;
-      const geometry = new THREE.BoxGeometry(transform.length(fixture.width), fixtureHeight, transform.length(fixture.height));
-      const mesh = new THREE.Mesh(geometry, fixtureMat);
-      mesh.position.set(pos.x, fixtureHeight / 2, pos.z);
-      mesh.rotation.y = transform.rotation(fixture.rotation);
-      scene.add(mesh);
-    });
+    scene.add(buildPlanScene(plan));
 
     const keys = new Set<string>();
     const keyDown = (event: KeyboardEvent) => keys.add(event.key.toLowerCase());
@@ -152,11 +82,16 @@ function ThreePreview({ plan }: { plan: Plan }) {
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
       window.removeEventListener("resize", handleResize);
+      const disposedMaterials = new Set<THREE.Material>();
       scene.traverse((object) => {
         if (object instanceof THREE.Mesh) {
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material) => material.dispose());
+          materials.forEach((material) => {
+            if (disposedMaterials.has(material)) return;
+            material.dispose();
+            disposedMaterials.add(material);
+          });
         }
       });
       renderer.dispose();

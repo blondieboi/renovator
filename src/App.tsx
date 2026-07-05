@@ -80,13 +80,15 @@ import type {
   Wall,
 } from "./types";
 import {
+  centimetersFromPixels,
   createAlternative,
   createRoomBoard,
   downloadJson,
+  formatCentimeters,
   fixtureLabels,
   flattenPoints,
-  metersFromPixels,
   nowIso,
+  pixelsFromCentimeters,
   rectangleRoomPoints,
   readFileAsDataUrl,
   roomArea,
@@ -150,7 +152,7 @@ function App() {
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const [polygonDraft, setPolygonDraft] = useState<PlanPoint[]>([]);
   const [calibrationPoints, setCalibrationPoints] = useState<PlanPoint[]>([]);
-  const [calibrationMeters, setCalibrationMeters] = useState("1");
+  const [calibrationCentimeters, setCalibrationCentimeters] = useState("100");
   const [spacePanning, setSpacePanning] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
     project: false,
@@ -809,14 +811,21 @@ function App() {
     );
   }
 
-  function applyCalibration() {
-    const meters = Number(calibrationMeters);
+  function calibrationMeasurementLabel() {
     const pixels = calibrationPixelDistance();
-    if (!Number.isFinite(meters) || meters <= 0 || pixels <= 0) return;
+    const pixelsPerMeter = active.alternative ? safePixelsPerMeter(active.alternative.plan) : 52;
+    return `${pixels.toFixed(0)} px · ${formatCentimeters(centimetersFromPixels(pixels, pixelsPerMeter))}`;
+  }
+
+  function applyCalibration() {
+    const centimeters = Number(calibrationCentimeters);
+    const pixels = calibrationPixelDistance();
+    if (!Number.isFinite(centimeters) || centimeters <= 0 || pixels <= 0) return;
+    const meters = centimeters / 100;
     updateAlternative((alternative) => {
       alternative.plan.scale.pixelsPerMeter = Math.round((pixels / meters) * 100) / 100;
     });
-    setStatus(`Scale calibrated: ${(pixels / meters).toFixed(2)} px/m`);
+    setStatus(`Scale calibrated: ${(pixels / centimeters).toFixed(2)} px/cm`);
     setCalibrationPoints([]);
     setTool("select");
   }
@@ -1036,10 +1045,16 @@ function App() {
     });
   }
 
-  function updateSelectedRoomDimensionMeters(dimension: "width" | "height", value: number) {
+  function updateSelectedRoomDimensionCentimeters(dimension: "width" | "height", value: number) {
     const pixelsPerMeter = active.alternative ? safePixelsPerMeter(active.alternative.plan) : undefined;
     if (!pixelsPerMeter || Number.isNaN(value)) return;
-    updateSelectedDimension(dimension, value * pixelsPerMeter);
+    updateSelectedDimension(dimension, pixelsFromCentimeters(value, pixelsPerMeter));
+  }
+
+  function updateSelectedDimensionCentimeters(dimension: "width" | "height", value: number) {
+    const pixelsPerMeter = active.alternative ? safePixelsPerMeter(active.alternative.plan) : undefined;
+    if (!pixelsPerMeter || Number.isNaN(value)) return;
+    updateSelectedDimension(dimension, pixelsFromCentimeters(value, pixelsPerMeter));
   }
 
   function updateSelectedRoomHeight(value: number) {
@@ -1087,13 +1102,18 @@ function App() {
   const activeMediaUploadLabel = activeMediaKind === "photos" ? "Add raw photos" : "Add renders";
   const selectedRoom = selection && "kind" in selection && selection.kind === "room" ? (selection as Room) : undefined;
   const selectedRoomHeight = selectedRoom?.ceilingHeightMeters ?? plan?.scale.ceilingHeightMeters ?? 2.55;
-  const selectedRoomWidthMeters =
-    selectedRoom && plan ? metersFromPixels(selectedRoom.width, safePixelsPerMeter(plan)) : 0;
-  const selectedRoomLengthMeters =
-    selectedRoom && plan ? metersFromPixels(selectedRoom.height, safePixelsPerMeter(plan)) : 0;
+  const selectedRoomHeightCentimeters = selectedRoomHeight * 100;
+  const selectedRoomWidthCentimeters =
+    selectedRoom && plan ? centimetersFromPixels(selectedRoom.width, safePixelsPerMeter(plan)) : 0;
+  const selectedRoomLengthCentimeters =
+    selectedRoom && plan ? centimetersFromPixels(selectedRoom.height, safePixelsPerMeter(plan)) : 0;
   const selectedShape = selection && !selectedRoom ? selection : undefined;
   const selectedShapeWidthLabel = selectedShape && "x2" in selectedShape ? "Length" : "Width";
   const selectedShapeHeightLabel = selectedShape && "x2" in selectedShape ? "Thickness" : "Height";
+  const selectedShapeWidthCentimeters =
+    selectedShape && plan ? centimetersFromPixels(selectedShape.width, safePixelsPerMeter(plan)) : 0;
+  const selectedShapeHeightCentimeters =
+    selectedShape && plan ? centimetersFromPixels(selectedShape.height, safePixelsPerMeter(plan)) : 0;
   const selectedShapeNameLabel =
     selectedShape && "kind" in selectedShape && (selectedShape.kind === "door" || selectedShape.kind === "window")
       ? `${selectedShape.kind[0].toUpperCase()}${selectedShape.kind.slice(1)} name`
@@ -1316,7 +1336,7 @@ function App() {
 
               <div className="scale-panel">
                 <label>
-                  Pixels / meter
+                  Pixels / 100 cm
                   <input
                     type="number"
                     min={10}
@@ -1343,17 +1363,17 @@ function App() {
                       ? "Click two known points on the floorplan."
                       : calibrationPoints.length === 1
                         ? "Click the second point."
-                        : `${calibrationPixelDistance().toFixed(0)} px selected.`}
+                        : `${calibrationMeasurementLabel()} selected.`}
                   </span>
                 </div>
                 <label>
-                  Known distance (m)
+                  Known distance (cm)
                   <input
                     type="number"
-                    min={0.01}
-                    step={0.01}
-                    value={calibrationMeters}
-                    onChange={(event) => setCalibrationMeters(event.target.value)}
+                    min={1}
+                    step={1}
+                    value={calibrationCentimeters}
+                    onChange={(event) => setCalibrationCentimeters(event.target.value)}
                   />
                 </label>
                 <div className="calibration-actions">
@@ -1612,7 +1632,7 @@ function App() {
                         key={`${wall.id}-measurement`}
                         x={(wall.x + wall.x2) / 2 - 18}
                         y={(wall.y + wall.y2) / 2 - 24}
-                        text={`${metersFromPixels(length, safePixelsPerMeter(plan)).toFixed(2)} m`}
+                        text={formatCentimeters(centimetersFromPixels(length, safePixelsPerMeter(plan)))}
                         fontSize={12}
                         fill="#687068"
                         listening={false}
@@ -1769,7 +1789,7 @@ function App() {
                         <Text
                           x={(calibrationPoints[0].x + calibrationPoints[1].x) / 2 + 8}
                           y={(calibrationPoints[0].y + calibrationPoints[1].y) / 2 - 18}
-                          text={`${calibrationPixelDistance().toFixed(0)} px`}
+                          text={calibrationMeasurementLabel()}
                           fontSize={13}
                           fontStyle="bold"
                           fill="#675b35"
@@ -1792,33 +1812,33 @@ function App() {
                   </label>
                   <div className="room-measure-fields">
                     <label>
-                      Width (m)
+                      Width (cm)
                       <input
                         type="number"
-                        min={0.1}
-                        step={0.01}
-                        value={selectedRoomWidthMeters.toFixed(2)}
-                        onChange={(event) => updateSelectedRoomDimensionMeters("width", Number(event.target.value))}
+                        min={1}
+                        step={1}
+                        value={Math.round(selectedRoomWidthCentimeters)}
+                        onChange={(event) => updateSelectedRoomDimensionCentimeters("width", Number(event.target.value))}
                       />
                     </label>
                     <label>
-                      Length (m)
+                      Length (cm)
                       <input
                         type="number"
-                        min={0.1}
-                        step={0.01}
-                        value={selectedRoomLengthMeters.toFixed(2)}
-                        onChange={(event) => updateSelectedRoomDimensionMeters("height", Number(event.target.value))}
+                        min={1}
+                        step={1}
+                        value={Math.round(selectedRoomLengthCentimeters)}
+                        onChange={(event) => updateSelectedRoomDimensionCentimeters("height", Number(event.target.value))}
                       />
                     </label>
                     <label>
-                      Height (m)
+                      Height (cm)
                       <input
                         type="number"
-                        min={0.1}
-                        step={0.01}
-                        value={selectedRoomHeight.toFixed(2)}
-                        onChange={(event) => updateSelectedRoomHeight(Number(event.target.value))}
+                        min={10}
+                        step={1}
+                        value={Math.round(selectedRoomHeightCentimeters)}
+                        onChange={(event) => updateSelectedRoomHeight(Number(event.target.value) / 100)}
                       />
                     </label>
                     <label>
@@ -1855,21 +1875,21 @@ function App() {
                   </label>
                   <div className="dimension-fields">
                     <label>
-                      {selectedShapeWidthLabel}
+                      {selectedShapeWidthLabel} (cm)
                       <input
                         type="number"
                         min={1}
-                        value={Math.round(selectedShape.width)}
-                        onChange={(event) => updateSelectedDimension("width", Number(event.target.value))}
+                        value={Math.round(selectedShapeWidthCentimeters)}
+                        onChange={(event) => updateSelectedDimensionCentimeters("width", Number(event.target.value))}
                       />
                     </label>
                     <label>
-                      {selectedShapeHeightLabel}
+                      {selectedShapeHeightLabel} (cm)
                       <input
                         type="number"
                         min={1}
-                        value={Math.round(selectedShape.height)}
-                        onChange={(event) => updateSelectedDimension("height", Number(event.target.value))}
+                        value={Math.round(selectedShapeHeightCentimeters)}
+                        onChange={(event) => updateSelectedDimensionCentimeters("height", Number(event.target.value))}
                       />
                     </label>
                     <label>
