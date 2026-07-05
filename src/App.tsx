@@ -132,6 +132,15 @@ const toolGroups: Array<{
   },
 ];
 
+function isFixtureObject(object: SelectablePlanObject): object is Fixture {
+  return !("x2" in object) && object.kind !== "room" && object.kind !== "door" && object.kind !== "window";
+}
+
+function isQuarterTurn(rotation: number) {
+  const angle = normalizeAngle(rotation);
+  return Math.abs(angle - 90) < 0.001 || Math.abs(angle - 270) < 0.001;
+}
+
 function App() {
   const [projects, setProjects] = useState<PropertyProject[]>([]);
   const [activePropertyId, setActivePropertyId] = useState("");
@@ -657,12 +666,14 @@ function App() {
     }
     const snappingDisabled = event.evt.altKey;
     const point = stagePointer(event, !snappingDisabled);
-    if (!point) return;
     if (tool === "calibrate") {
+      const calibrationPoint = stagePlanPointer(event);
+      if (!calibrationPoint) return;
       setSelectedId(null);
-      setCalibrationPoints((current) => (current.length >= 2 ? [point] : [...current, point]));
+      setCalibrationPoints((current) => (current.length >= 2 ? [calibrationPoint] : [...current, calibrationPoint]));
       return;
     }
+    if (!point) return;
     if (tool === "polyRoom") {
       if (event.evt.detail >= 2) {
         finishPolygonRoom([...polygonDraft, point]);
@@ -1054,7 +1065,14 @@ function App() {
   function updateSelectedDimensionCentimeters(dimension: "width" | "height", value: number) {
     const pixelsPerMeter = active.alternative ? safePixelsPerMeter(active.alternative.plan) : undefined;
     if (!pixelsPerMeter || Number.isNaN(value)) return;
-    updateSelectedDimension(dimension, pixelsFromCentimeters(value, pixelsPerMeter));
+    const selected = selection;
+    const targetDimension =
+      selected && isFixtureObject(selected) && isQuarterTurn(selected.rotation)
+        ? dimension === "width"
+          ? "height"
+          : "width"
+        : dimension;
+    updateSelectedDimension(targetDimension, pixelsFromCentimeters(value, pixelsPerMeter));
   }
 
   function updateSelectedRoomHeight(value: number) {
@@ -1110,10 +1128,22 @@ function App() {
   const selectedShape = selection && !selectedRoom ? selection : undefined;
   const selectedShapeWidthLabel = selectedShape && "x2" in selectedShape ? "Length" : "Width";
   const selectedShapeHeightLabel = selectedShape && "x2" in selectedShape ? "Thickness" : "Height";
+  const selectedShapeUsesVisualDimensions =
+    selectedShape && isFixtureObject(selectedShape) && isQuarterTurn(selectedShape.rotation);
   const selectedShapeWidthCentimeters =
-    selectedShape && plan ? centimetersFromPixels(selectedShape.width, safePixelsPerMeter(plan)) : 0;
+    selectedShape && plan
+      ? centimetersFromPixels(
+          selectedShapeUsesVisualDimensions ? selectedShape.height : selectedShape.width,
+          safePixelsPerMeter(plan),
+        )
+      : 0;
   const selectedShapeHeightCentimeters =
-    selectedShape && plan ? centimetersFromPixels(selectedShape.height, safePixelsPerMeter(plan)) : 0;
+    selectedShape && plan
+      ? centimetersFromPixels(
+          selectedShapeUsesVisualDimensions ? selectedShape.width : selectedShape.height,
+          safePixelsPerMeter(plan),
+        )
+      : 0;
   const selectedShapeNameLabel =
     selectedShape && "kind" in selectedShape && (selectedShape.kind === "door" || selectedShape.kind === "window")
       ? `${selectedShape.kind[0].toUpperCase()}${selectedShape.kind.slice(1)} name`
@@ -1360,7 +1390,7 @@ function App() {
                   <strong>Scale calibration</strong>
                   <span>
                     {calibrationPoints.length === 0
-                      ? "Click two known points on the floorplan."
+                      ? "Click two exact points on the floorplan."
                       : calibrationPoints.length === 1
                         ? "Click the second point."
                         : `${calibrationMeasurementLabel()} selected.`}
