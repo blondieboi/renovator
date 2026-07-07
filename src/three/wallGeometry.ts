@@ -1,6 +1,7 @@
 import * as THREE from "three";
-import { distance, nearestOpeningWall, openingCenter, openingHandlePoints, snapThreshold } from "../geometry";
+import { openingHandlePoints } from "../geometry";
 import type { Opening, Plan, Wall } from "../types";
+import type { OpeningInterval, PlanTopology, WallEdge, WallJoint } from "../topology";
 import type { PlanToWorldTransform } from "./planToWorld";
 
 interface WallGeometryMaterials {
@@ -9,66 +10,8 @@ interface WallGeometryMaterials {
   glass: THREE.Material;
 }
 
-interface OpeningInterval {
-  opening: Opening;
-  start: number;
-  end: number;
-  wallDistance: number;
-}
-
 function wallLength(wall: Wall) {
   return Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y);
-}
-
-function safeGridSize(plan: Plan) {
-  return Number.isFinite(plan.scale.gridSize) && plan.scale.gridSize >= 1 ? plan.scale.gridSize : 26;
-}
-
-export function resolveOpeningWallId(plan: Plan, opening: Opening) {
-  const intervalMatches = plan.walls
-    .map((wall) => ({ wall, interval: openingIntervalOnWall(opening, wall, safeGridSize(plan)) }))
-    .filter((match): match is { wall: Wall; interval: OpeningInterval } => Boolean(match.interval))
-    .sort((a, b) => {
-      if (a.wall.id === opening.wallId) return -1;
-      if (b.wall.id === opening.wallId) return 1;
-      return a.interval.wallDistance - b.interval.wallDistance;
-    });
-  if (intervalMatches[0]) return intervalMatches[0].wall.id;
-  return nearestOpeningWall(opening, plan.walls, snapThreshold(safeGridSize(plan)) * 3)?.wall.id;
-}
-
-function openingIntervalOnWall(opening: Opening, wall: Wall, gridSize: number): OpeningInterval | undefined {
-  const length = wallLength(wall);
-  if (length <= 0) return undefined;
-
-  const axis = {
-    x: (wall.x2 - wall.x) / length,
-    y: (wall.y2 - wall.y) / length,
-  };
-  const center = openingCenter(opening);
-  const centerProjection = (center.x - wall.x) * axis.x + (center.y - wall.y) * axis.y;
-  const clampedCenterProjection = Math.max(0, Math.min(length, centerProjection));
-  const projectedCenter = {
-    x: wall.x + axis.x * clampedCenterProjection,
-    y: wall.y + axis.y * clampedCenterProjection,
-  };
-  const wallDistance = distance(center, projectedCenter);
-  const tolerance = Math.max(snapThreshold(gridSize) * 3, opening.height * 3, wall.thickness * 3);
-  if (wallDistance > tolerance) return undefined;
-  if (centerProjection < -opening.width / 2 || centerProjection > length + opening.width / 2) return undefined;
-
-  let start = Math.max(0, centerProjection - opening.width / 2);
-  let end = Math.min(length, centerProjection + opening.width / 2);
-
-  if (end - start < 2) {
-    const handles = openingHandlePoints(opening);
-    const project = (point: { x: number; y: number }) => (point.x - wall.x) * axis.x + (point.y - wall.y) * axis.y;
-    start = Math.max(0, Math.min(length, Math.min(project(handles.start), project(handles.end))));
-    end = Math.max(0, Math.min(length, Math.max(project(handles.start), project(handles.end))));
-  }
-
-  if (end - start < 2) return undefined;
-  return { opening, start, end, wallDistance };
 }
 
 function addWallSegment(
@@ -99,6 +42,9 @@ function addWallSegment(
   const thickness = Math.max(transform.length(wall.thickness), 5);
   const geometry = new THREE.BoxGeometry(transform.length(segmentLength), height, thickness);
   const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = wall.id;
+  mesh.userData.planObjectId = wall.id;
+  mesh.userData.planObjectKind = "wall";
   mesh.position.set(mid.x, yOffset + height / 2, mid.z);
   mesh.rotation.y = -Math.atan2(wall.y2 - wall.y, wall.x2 - wall.x);
   mesh.castShadow = true;
@@ -123,34 +69,70 @@ function addOpeningPanel(
   const pos = transform.point(center);
   const geometry = new THREE.BoxGeometry(transform.length(opening.width), height, 3);
   const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = opening.id;
+  mesh.userData.planObjectId = opening.id;
+  mesh.userData.planObjectKind = opening.kind;
   mesh.position.set(pos.x, yCenter, pos.z);
   mesh.rotation.y = -Math.atan2(wall.y2 - wall.y, wall.x2 - wall.x);
+  mesh.castShadow = true;
   group.add(mesh);
+}
+
+function addWallJointCap(
+  group: THREE.Group,
+  joint: WallJoint,
+  topology: PlanTopology,
+  transform: PlanToWorldTransform,
+  material: THREE.Material,
+  height: number,
+) {
+  if (joint.endpoints.length < 2) return;
+  const walls = joint.endpoints
+    .map((endpoint) => topology.edges.find((edge) => edge.wall.id === endpoint.wallId)?.wall)
+    .filter((wall): wall is Wall => Boolean(wall));
+  const maxThickness = Math.max(...walls.map((wall) => transform.length(wall.thickness)), 5);
+  const pos = transform.point(joint.point);
+  const geometry = new THREE.BoxGeometry(maxThickness, height, maxThickness);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = joint.id;
+  mesh.userData.planObjectKind = "wall-joint";
+  mesh.position.set(pos.x, height / 2, pos.z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  group.add(mesh);
+}
+
+function addEdgeOutline(group: THREE.Group, mesh: THREE.Mesh, color = "#d7d0c4") {
+  const edges = new THREE.EdgesGeometry(mesh.geometry, 35);
+  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.42 }));
+  line.position.copy(mesh.position);
+  line.rotation.copy(mesh.rotation);
+  line.scale.copy(mesh.scale);
+  line.userData.planObjectId = mesh.userData.planObjectId;
+  line.userData.planObjectKind = "outline";
+  group.add(line);
 }
 
 export function buildWallElements(
   plan: Plan,
-  wall: Wall,
+  edge: WallEdge,
+  topology: PlanTopology,
   transform: PlanToWorldTransform,
   wallHeight: number,
   materials: WallGeometryMaterials,
 ) {
   const group = new THREE.Group();
+  const wall = edge.wall;
   const length = wallLength(wall);
-  const gridSize = safeGridSize(plan);
-  const openings = plan.openings
-    .filter((opening) => resolveOpeningWallId(plan, opening) === wall.id)
-    .map((opening) => openingIntervalOnWall(opening, wall, gridSize))
-    .filter((opening): opening is OpeningInterval => Boolean(opening))
-    .sort((a, b) => a.start - b.start);
+  const openings = topology.openingIntervalsByWallId.get(wall.id) ?? [];
 
   let cursor = 0;
   openings.forEach((interval) => {
     addWallSegment(group, wall, transform, materials.wall, cursor, interval.start, wallHeight);
 
     if (interval.opening.kind === "window") {
-      const sillHeight = wallHeight * 0.4;
-      const windowHeight = wallHeight * 0.36;
+      const sillHeight = Math.min(transform.meters(0.9), wallHeight * 0.48);
+      const windowHeight = Math.min(transform.meters(1.1), wallHeight - sillHeight - transform.meters(0.18));
       const headerStart = sillHeight + windowHeight;
       addWallSegment(group, wall, transform, materials.wall, interval.start, interval.end, sillHeight);
       addWallSegment(group, wall, transform, materials.wall, interval.start, interval.end, wallHeight - headerStart, headerStart);
@@ -158,12 +140,21 @@ export function buildWallElements(
     }
 
     if (interval.opening.kind === "door") {
-      addOpeningPanel(group, wall, interval.opening, transform, materials.door, 3, 1.5);
+      const doorHeight = Math.min(transform.meters(2.05), wallHeight * 0.86);
+      addWallSegment(group, wall, transform, materials.wall, interval.start, interval.end, wallHeight - doorHeight, doorHeight);
+      addOpeningPanel(group, wall, interval.opening, transform, materials.door, transform.meters(0.04), transform.meters(0.02));
     }
 
     cursor = Math.max(cursor, interval.end);
   });
 
   addWallSegment(group, wall, transform, materials.wall, cursor, length, wallHeight);
+  [edge.startJointId, edge.endJointId].forEach((jointId) => {
+    const joint = topology.joints.find((item) => item.id === jointId);
+    if (joint) addWallJointCap(group, joint, topology, transform, materials.wall, wallHeight);
+  });
+  group.traverse((object) => {
+    if (object instanceof THREE.Mesh && object.userData.planObjectKind === "wall") addEdgeOutline(group, object);
+  });
   return group;
 }

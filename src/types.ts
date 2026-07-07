@@ -1,4 +1,5 @@
 export type PropertyType = "Apartment" | "House";
+export type ProjectOwnerId = "local-user" | string;
 export type ToolMode =
   | "select"
   | "pan"
@@ -111,8 +112,11 @@ export interface Floor {
 
 export interface PropertyProject {
   id: string;
+  schemaVersion: number;
+  ownerId: ProjectOwnerId;
   name: string;
   type: PropertyType;
   floors: Floor[];
+  createdAt: string;
   updatedAt: string;
 }

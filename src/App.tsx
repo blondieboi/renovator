@@ -1,5 +1,6 @@
 import {
   AppWindow,
+  ArrowLeft,
   BedDouble,
   Camera,
   ChevronDown,
@@ -9,6 +10,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FolderOpen,
   Grid3X3,
   Hand,
   Home,
@@ -37,7 +39,7 @@ import MediaUploadAction from "./components/MediaUploadAction";
 import PlanFixtureGlyph from "./components/PlanFixtureGlyph";
 import RoomGallery from "./components/RoomGallery";
 import SidebarSection from "./components/SidebarSection";
-import { db, loadProjects, saveProjects } from "./db";
+import { loadProjects, saveProjects } from "./db";
 import {
   constrainOpeningHandle,
   constrainedOpeningPosition,
@@ -65,6 +67,7 @@ import {
   type SelectablePlanObject,
   type StructureSelection,
 } from "./model";
+import { derivePlanTopology, findWallEndpointJoint, isSimplePolygon } from "./topology";
 import type {
   Alternative,
   Asset,
@@ -72,8 +75,10 @@ import type {
   FixtureKind,
   Floor,
   Opening,
+  Plan,
   PlanPoint,
   PropertyProject,
+  PropertyType,
   Room,
   RoomBoard,
   ToolMode,
@@ -81,13 +86,17 @@ import type {
 } from "./types";
 import {
   centimetersFromPixels,
+  cloneProjectForLocal,
   createAlternative,
+  createPropertyProject,
   createRoomBoard,
-  downloadJson,
+  downloadProjectJson,
+  downloadProjectsJson,
   formatCentimeters,
   fixtureLabels,
   flattenPoints,
   nowIso,
+  parseProjectExport,
   pixelsFromCentimeters,
   rectangleRoomPoints,
   readFileAsDataUrl,
@@ -98,6 +107,8 @@ import {
 } from "./utils";
 
 const ThreePreview = lazy(() => import("./ThreePreview"));
+
+type AppScreen = "projects" | "editor";
 
 const toolGroups: Array<{
   title: string;
@@ -141,8 +152,81 @@ function isQuarterTurn(rotation: number) {
   return Math.abs(angle - 90) < 0.001 || Math.abs(angle - 270) < 0.001;
 }
 
+function projectStats(project: PropertyProject) {
+  const alternatives = project.floors.flatMap((floor) => floor.alternatives);
+  return {
+    floors: project.floors.length,
+    alternatives: alternatives.length,
+    rooms: alternatives.reduce((total, alternative) => total + alternative.plan.rooms.length, 0),
+    fixtures: alternatives.reduce((total, alternative) => total + alternative.plan.fixtures.length, 0),
+  };
+}
+
+function firstProjectPlan(project: PropertyProject): Plan | undefined {
+  return project.floors[0]?.alternatives[0]?.plan;
+}
+
+function ProjectPreview({ project }: { project: PropertyProject }) {
+  const plan = firstProjectPlan(project);
+  const rooms = plan?.rooms ?? [];
+  const walls = plan?.walls ?? [];
+  const points = [
+    ...rooms.flatMap((room) => roomPoints(room).map((point) => ({ x: room.x + point.x, y: room.y + point.y }))),
+    ...walls.flatMap((wall) => [
+      { x: wall.x, y: wall.y },
+      { x: wall.x2, y: wall.y2 },
+    ]),
+  ];
+
+  if (!plan || points.length === 0) {
+    return (
+      <div className="project-preview empty">
+        <Home size={24} />
+        <span>No sketch yet</span>
+      </div>
+    );
+  }
+
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  const padding = Math.max(24, Math.max(maxX - minX, maxY - minY) * 0.08);
+  const viewBox = `${minX - padding} ${minY - padding} ${Math.max(1, maxX - minX + padding * 2)} ${Math.max(
+    1,
+    maxY - minY + padding * 2,
+  )}`;
+
+  return (
+    <div className="project-preview">
+      <svg viewBox={viewBox} role="img" aria-label={`${project.name} preview`} preserveAspectRatio="xMidYMid meet">
+        {rooms.map((room) => (
+          <polygon
+            key={room.id}
+            points={roomPoints(room)
+              .map((point) => `${room.x + point.x},${room.y + point.y}`)
+              .join(" ")}
+            fill={room.color}
+          />
+        ))}
+        {walls.map((wall) => (
+          <line
+            key={wall.id}
+            x1={wall.x}
+            y1={wall.y}
+            x2={wall.x2}
+            y2={wall.y2}
+            strokeWidth={Math.max(8, wall.thickness)}
+          />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
 function App() {
   const [projects, setProjects] = useState<PropertyProject[]>([]);
+  const [appScreen, setAppScreen] = useState<AppScreen>("projects");
   const [activePropertyId, setActivePropertyId] = useState("");
   const [activeFloorId, setActiveFloorId] = useState("");
   const [activeAlternativeId, setActiveAlternativeId] = useState("");
@@ -183,6 +267,7 @@ function App() {
       setActiveFloorId(floor?.id ?? "");
       setActiveAlternativeId(alternative?.id ?? "");
       setStructureSelection(alternative ? { type: "alternative", id: alternative.id } : null);
+      setAppScreen("projects");
       setStatus("Saved locally");
     });
   }, []);
@@ -336,11 +421,22 @@ function App() {
     });
   }
 
-  function updateActiveProjectName(name: string) {
+  function updateProjectName(projectId: string, name: string) {
     updateProjects((draft) => {
-      const { property } = findActiveDraft(draft);
+      const property = draft.find((item) => item.id === projectId);
       if (property) {
         property.name = name;
+        property.updatedAt = nowIso();
+      }
+      return draft;
+    });
+  }
+
+  function updateProjectType(projectId: string, type: PropertyType) {
+    updateProjects((draft) => {
+      const property = draft.find((item) => item.id === projectId);
+      if (property) {
+        property.type = type;
         property.updatedAt = nowIso();
       }
       return draft;
@@ -369,25 +465,6 @@ function App() {
     });
   }
 
-  function selectProperty(id: string, selectionType: StructureSelection["type"] = "project") {
-    const property = projects.find((item) => item.id === id);
-    const floor = property?.floors[0];
-    const alternative = floor?.alternatives[0];
-    setActivePropertyId(id);
-    setActiveFloorId(floor?.id ?? "");
-    setActiveAlternativeId(alternative?.id ?? "");
-    setSelectedId(null);
-    setStructureSelection({ type: selectionType, id });
-  }
-
-  function selectFloor(id: string) {
-    const floor = active.property?.floors.find((item) => item.id === id);
-    setActiveFloorId(id);
-    setActiveAlternativeId(floor?.alternatives[0]?.id ?? "");
-    setSelectedId(null);
-    setStructureSelection({ type: "floor", id });
-  }
-
   function selectTreeFloor(propertyId: string, floorId: string) {
     const property = projects.find((item) => item.id === propertyId);
     const floor = property?.floors.find((item) => item.id === floorId);
@@ -404,6 +481,103 @@ function App() {
     setActiveAlternativeId(alternativeId);
     setSelectedId(null);
     setStructureSelection({ type: "alternative", id: alternativeId });
+  }
+
+  function activateProject(project: PropertyProject, selection: StructureSelection = { type: "project", id: project.id }) {
+    const floor = project.floors[0];
+    const alternative = floor?.alternatives[0];
+    setActivePropertyId(project.id);
+    setActiveFloorId(floor?.id ?? "");
+    setActiveAlternativeId(alternative?.id ?? "");
+    setSelectedId(null);
+    setStructureSelection(selection);
+    setExpandedTreeNodes((currentExpanded) => ({
+      ...currentExpanded,
+      [project.id]: true,
+      ...(floor ? { [floor.id]: true } : {}),
+    }));
+  }
+
+  function enterProject(projectId: string) {
+    const project = projects.find((item) => item.id === projectId);
+    if (!project) return;
+    const floor = project.floors[0];
+    const alternative = floor?.alternatives[0];
+    activateProject(
+      project,
+      alternative
+        ? { type: "alternative", id: alternative.id }
+        : floor
+          ? { type: "floor", id: floor.id }
+          : { type: "project", id: project.id },
+    );
+    setSidebarCollapsed(false);
+    setAppScreen("editor");
+  }
+
+  function backToProjects() {
+    setSelectedId(null);
+    setPolygonDraft([]);
+    setCalibrationPoints([]);
+    setTool("select");
+    setAppScreen("projects");
+  }
+
+  function addProject() {
+    updateProjects((draft) => {
+      const project = createPropertyProject(`Project ${draft.length + 1}`);
+      const floor = project.floors[0];
+      const alternative = floor?.alternatives[0];
+      draft.push(project);
+      activateProject(
+        project,
+        alternative
+          ? { type: "alternative", id: alternative.id }
+          : floor
+            ? { type: "floor", id: floor.id }
+            : { type: "project", id: project.id },
+      );
+      setAppScreen("editor");
+      return draft;
+    });
+  }
+
+  function duplicateProject(projectId: string) {
+    const source = projects.find((item) => item.id === projectId);
+    if (!source) return;
+    updateProjects((draft) => {
+      const copy = cloneProjectForLocal(source);
+      const floor = copy.floors[0];
+      const alternative = floor?.alternatives[0];
+      draft.push(copy);
+      activateProject(
+        copy,
+        alternative
+          ? { type: "alternative", id: alternative.id }
+          : floor
+            ? { type: "floor", id: floor.id }
+            : { type: "project", id: copy.id },
+      );
+      setAppScreen("editor");
+      return draft;
+    });
+  }
+
+  function deleteProject(projectId: string) {
+    const project = projects.find((item) => item.id === projectId);
+    if (!project || projects.length <= 1) return;
+    if (!window.confirm(`Delete "${project.name}" and all of its floors?`)) return;
+    updateProjects((draft) => {
+      const projectIndex = draft.findIndex((item) => item.id === projectId);
+      if (projectIndex < 0 || draft.length <= 1) return draft;
+      draft.splice(projectIndex, 1);
+      if (activePropertyId === projectId) {
+        const nextProject = draft[Math.max(0, projectIndex - 1)] ?? draft[0];
+        if (nextProject) activateProject(nextProject);
+        setAppScreen("projects");
+      }
+      return draft;
+    });
   }
 
   function addAlternative(propertyId = activePropertyId, floorId = activeFloorId) {
@@ -546,21 +720,22 @@ function App() {
   async function handleJsonImport(files: FileList | null) {
     const file = files?.[0];
     if (!file) return;
-    const text = await file.text();
-    const parsed = JSON.parse(text) as { projects?: PropertyProject[] };
-    if (!Array.isArray(parsed.projects)) throw new Error("Project export is missing projects.");
-    await db.projects.clear();
-    await db.projects.bulkPut(parsed.projects);
-    setProjects(parsed.projects);
-    const property = parsed.projects[0];
-    const floor = property?.floors[0];
-    const alternative = floor?.alternatives[0];
-    setActivePropertyId(property?.id ?? "");
-    setActiveFloorId(floor?.id ?? "");
-    setActiveAlternativeId(alternative?.id ?? "");
-    setSelectedId(null);
-    setStructureSelection(alternative ? { type: "alternative", id: alternative.id } : null);
-    setStatus("Imported project export");
+    try {
+      const text = await file.text();
+      const imported = parseProjectExport(text).map((project) => cloneProjectForLocal(project, `${project.name} import`));
+      if (imported.length === 0) throw new Error("Project export did not contain any projects.");
+      updateProjects((draft) => {
+        draft.push(...imported);
+        activateProject(imported[0]);
+        setAppScreen("projects");
+        return draft;
+      });
+      setStatus(`Imported ${imported.length} project${imported.length === 1 ? "" : "s"}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not import project export");
+    } finally {
+      if (jsonImportRef.current) jsonImportRef.current.value = "";
+    }
   }
 
   function gridLines() {
@@ -628,6 +803,10 @@ function App() {
 
   function finishPolygonRoom(points = polygonDraft) {
     if (points.length < 3) return;
+    if (!isSimplePolygon(points)) {
+      setStatus("Room polygon needs a simple, non-overlapping outline.");
+      return;
+    }
     updateAlternative((alternative) => {
       const plan = alternative.plan;
       const minX = Math.min(...points.map((point) => point.x));
@@ -675,11 +854,15 @@ function App() {
     }
     if (!point) return;
     if (tool === "polyRoom") {
+      const polygonPoint =
+        snappingDisabled || !active.alternative
+          ? point
+          : snapStructuralPoint(point, active.alternative.plan.walls, safeGridSize(active.alternative.plan));
       if (event.evt.detail >= 2) {
-        finishPolygonRoom([...polygonDraft, point]);
+        finishPolygonRoom([...polygonDraft, polygonPoint]);
         return;
       }
-      setPolygonDraft((current) => [...current, point]);
+      setPolygonDraft((current) => [...current, polygonPoint]);
       setSelectedId(null);
       return;
     }
@@ -917,19 +1100,26 @@ function App() {
     updateAlternative((alternative) => {
       const wall = alternative.plan.walls.find((item) => item.id === id);
       if (!wall) return;
+      const topology = derivePlanTopology(alternative.plan);
+      const connectedJoint = snappingDisabled ? undefined : findWallEndpointJoint(topology, id, endpoint);
       const nextPoint = snappingDisabled
         ? point
         : snapStructuralPoint(point, alternative.plan.walls, safeGridSize(alternative.plan), wall.id);
-      if (endpoint === "start") {
-        wall.x = nextPoint.x;
-        wall.y = nextPoint.y;
-      } else {
-        wall.x2 = nextPoint.x;
-        wall.y2 = nextPoint.y;
-      }
-      const width = Math.max(1, Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y));
-      wall.width = width;
-      wall.rotation = wallAngle(wall);
+      const endpointsToMove = connectedJoint?.endpoints ?? [{ wallId: id, endpoint }];
+      endpointsToMove.forEach((target) => {
+        const targetWall = alternative.plan.walls.find((item) => item.id === target.wallId);
+        if (!targetWall) return;
+        if (target.endpoint === "start") {
+          targetWall.x = nextPoint.x;
+          targetWall.y = nextPoint.y;
+        } else {
+          targetWall.x2 = nextPoint.x;
+          targetWall.y2 = nextPoint.y;
+        }
+        const width = Math.max(1, Math.hypot(targetWall.x2 - targetWall.x, targetWall.y2 - targetWall.y));
+        targetWall.width = width;
+        targetWall.rotation = wallAngle(targetWall);
+      });
     });
   }
 
@@ -956,13 +1146,22 @@ function App() {
     room.points = points.map((point) => ({ x: point.x - minX, y: point.y - minY }));
   }
 
-  function moveRoomPoint(roomId: string, pointIndex: number, point: PlanPoint) {
+  function moveRoomPoint(roomId: string, pointIndex: number, absolutePoint: PlanPoint, snappingDisabled: boolean) {
     updateAlternative((alternative) => {
       const room = alternative.plan.rooms.find((item) => item.id === roomId);
       if (!room) return;
       const points = roomPoints(room);
-      points[pointIndex] = point;
-      room.points = points;
+      const nextPoint = snappingDisabled
+        ? absolutePoint
+        : snapStructuralPoint(absolutePoint, alternative.plan.walls, safeGridSize(alternative.plan));
+      const nextLocalPoint = { x: nextPoint.x - room.x, y: nextPoint.y - room.y };
+      const nextPoints = points.map((point, index) => (index === pointIndex ? nextLocalPoint : point));
+      const nextAbsolutePoints = nextPoints.map((point) => ({ x: room.x + point.x, y: room.y + point.y }));
+      if (!isSimplePolygon(nextAbsolutePoints)) {
+        setStatus("Room polygon edits cannot cross another room edge.");
+        return;
+      }
+      room.points = nextPoints;
       normalizeRoom(room);
     });
   }
@@ -974,10 +1173,7 @@ function App() {
       x: (pointer.x - viewport.x) / viewport.scale,
       y: (pointer.y - viewport.y) / viewport.scale,
     };
-    moveRoomPoint(room.id, pointIndex, {
-      x: planPoint.x - room.x,
-      y: planPoint.y - room.y,
-    });
+    moveRoomPoint(room.id, pointIndex, planPoint, event.evt.altKey);
   }
 
   function updateSelectedRotation(value: number) {
@@ -1148,6 +1344,14 @@ function App() {
     selectedShape && "kind" in selectedShape && (selectedShape.kind === "door" || selectedShape.kind === "window")
       ? `${selectedShape.kind[0].toUpperCase()}${selectedShape.kind.slice(1)} name`
       : "Shape name";
+  const inspectorTitle =
+    selectedRoom?.name ??
+    selectedShape?.name ??
+    (activeStructure?.type === "floor"
+      ? activeStructure.floor.name
+      : activeStructure?.type === "alternative"
+        ? activeStructure.alternative.name
+        : "Details");
   const isTreeNodeExpanded = (id: string) => expandedTreeNodes[id] !== false;
   const toggleTreeNode = (id: string) => {
     setExpandedTreeNodes((current) => ({ ...current, [id]: current[id] === false }));
@@ -1155,6 +1359,139 @@ function App() {
   const toggleSection = (id: string) => {
     setCollapsedSections((current) => ({ ...current, [id]: !current[id] }));
   };
+
+  if (appScreen === "projects") {
+    return (
+      <div className="project-dashboard">
+        <header className="project-dashboard-top">
+          <div className="dashboard-brand">
+            <Home size={28} />
+            <div>
+              <strong>Renovation Planner</strong>
+              <span>{status}</span>
+            </div>
+          </div>
+          <div className="dashboard-actions">
+            <button type="button" onClick={addProject}>
+              <Plus size={17} />
+              New project
+            </button>
+            <button type="button" onClick={() => jsonImportRef.current?.click()}>
+              <Import size={17} />
+              Import
+            </button>
+            <button type="button" onClick={() => downloadProjectsJson(projects)} disabled={projects.length === 0}>
+              <Download size={17} />
+              Export all
+            </button>
+          </div>
+        </header>
+
+        <main className="project-dashboard-main">
+          <section className="project-dashboard-heading">
+            <div>
+              <h1>Your renovation projects</h1>
+              <p>Pick up a room plan, duplicate an idea, or start a fresh sketch.</p>
+            </div>
+            <div className="dashboard-summary">
+              <span>Projects</span>
+              <strong>{projects.length}</strong>
+            </div>
+          </section>
+
+          <section className="project-card-grid" aria-label="Projects">
+            {projects.map((project) => {
+              const stats = projectStats(project);
+              return (
+                <article className="project-card" key={project.id}>
+                  <header>
+                    <div className="project-card-title">
+                      <h2>{project.name}</h2>
+                      <span>{project.type}</span>
+                    </div>
+                    <button type="button" className="project-open-button" onClick={() => enterProject(project.id)}>
+                      <FolderOpen size={16} />
+                      Open
+                    </button>
+                  </header>
+
+                  <ProjectPreview project={project} />
+
+                  <div className="project-card-stats">
+                    <div>
+                      <span>Floors</span>
+                      <strong>{stats.floors}</strong>
+                    </div>
+                    <div>
+                      <span>Layouts</span>
+                      <strong>{stats.alternatives}</strong>
+                    </div>
+                    <div>
+                      <span>Rooms</span>
+                      <strong>{stats.rooms}</strong>
+                    </div>
+                    <div>
+                      <span>Objects</span>
+                      <strong>{stats.fixtures}</strong>
+                    </div>
+                  </div>
+
+                  <details className="project-card-edit">
+                    <summary>Edit details</summary>
+                    <div>
+                      <label>
+                        Name
+                        <input
+                          value={project.name}
+                          onChange={(event) => updateProjectName(project.id, event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Home type
+                        <select
+                          value={project.type}
+                          onChange={(event) => updateProjectType(project.id, event.target.value as PropertyType)}
+                        >
+                          <option value="Apartment">Apartment</option>
+                          <option value="House">House</option>
+                        </select>
+                      </label>
+                    </div>
+                  </details>
+
+                  <footer>
+                    <button type="button" onClick={() => duplicateProject(project.id)} title={`Duplicate ${project.name}`}>
+                      <CopyPlus size={17} />
+                    </button>
+                    <button type="button" onClick={() => downloadProjectJson(project)} title={`Export ${project.name}`}>
+                      <Download size={17} />
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => deleteProject(project.id)}
+                      disabled={projects.length <= 1}
+                      title={projects.length <= 1 ? "Keep at least one project" : `Delete ${project.name}`}
+                    >
+                      <Trash2 size={17} />
+                    </button>
+                  </footer>
+                </article>
+              );
+            })}
+          </section>
+        </main>
+
+        <input
+          hidden
+          ref={jsonImportRef}
+          type="file"
+          accept="application/json"
+          onChange={(event) => handleJsonImport(event.target.files)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
@@ -1181,130 +1518,96 @@ function App() {
         {!sidebarCollapsed && (
           <>
             <SidebarSection
-              title="Project"
+              title="Layouts"
               collapsed={Boolean(collapsedSections.project)}
               onToggle={() => toggleSection("project")}
             >
-              <div className="project-tree" aria-label="Project structure">
-                {projects.map((project) => {
-                  const projectExpanded = isTreeNodeExpanded(project.id);
+              <div className="project-tree" aria-label="Project layouts">
+                {active.property?.floors.map((floor) => {
+                  const floorExpanded = isTreeNodeExpanded(floor.id);
                   return (
-                    <div className="tree-project" key={project.id}>
-                      <div className="tree-row tree-row-project">
+                    <div className="tree-floor" key={floor.id}>
+                      <div className="tree-row tree-row-floor">
                         <button
                           className="tree-disclosure"
-                          onClick={() => toggleTreeNode(project.id)}
-                          title={projectExpanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-                          aria-expanded={projectExpanded}
+                          onClick={() => toggleTreeNode(floor.id)}
+                          title={floorExpanded ? `Collapse ${floor.name}` : `Expand ${floor.name}`}
+                          aria-expanded={floorExpanded}
                         >
-                          {projectExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          {floorExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         </button>
                         <button
                           className={
-                            structureSelection?.type === "project" && structureSelection.id === project.id
+                            structureSelection?.type === "floor" && structureSelection.id === floor.id
                               ? "tree-node active"
                               : "tree-node"
                           }
-                          onClick={() => selectProperty(project.id)}
+                          onClick={() => selectTreeFloor(active.property!.id, floor.id)}
                         >
-                          <span>{project.name}</span>
-                          <small>{project.type}</small>
+                          <span>{floor.name}</span>
+                          <small>{floor.alternatives.length} alt</small>
                         </button>
                         <button
                           className="tree-action"
-                          onClick={() => addFloor(project.id)}
-                          title={`Add floor to ${project.name}`}
+                          onClick={() => addAlternative(active.property!.id, floor.id)}
+                          title={`Duplicate alternative on ${floor.name}`}
                         >
-                          <Plus size={15} />
+                          <CopyPlus size={15} />
+                        </button>
+                        <button
+                          className="tree-action danger"
+                          onClick={() => deleteFloor(floor.id)}
+                          disabled={(active.property?.floors.length ?? 0) <= 1}
+                          title={
+                            (active.property?.floors.length ?? 0) <= 1
+                              ? "A project needs at least one floor"
+                              : `Delete ${floor.name}`
+                          }
+                        >
+                          <Trash2 size={15} />
                         </button>
                       </div>
 
-                      {projectExpanded && (
-                        <div className="tree-children">
-                          {project.floors.map((floor) => {
-                            const floorExpanded = isTreeNodeExpanded(floor.id);
-                            return (
-                              <div className="tree-floor" key={floor.id}>
-                                <div className="tree-row tree-row-floor">
-                                  <button
-                                    className="tree-disclosure"
-                                    onClick={() => toggleTreeNode(floor.id)}
-                                    title={floorExpanded ? `Collapse ${floor.name}` : `Expand ${floor.name}`}
-                                    aria-expanded={floorExpanded}
-                                  >
-                                    {floorExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                  </button>
-                                  <button
-                                    className={
-                                      structureSelection?.type === "floor" && structureSelection.id === floor.id
-                                        ? "tree-node active"
-                                        : "tree-node"
-                                    }
-                                    onClick={() => selectTreeFloor(project.id, floor.id)}
-                                  >
-                                    <span>{floor.name}</span>
-                                    <small>{floor.alternatives.length} alt</small>
-                                  </button>
-                                  <button
-                                    className="tree-action"
-                                    onClick={() => addAlternative(project.id, floor.id)}
-                                    title={`Duplicate alternative on ${floor.name}`}
-                                  >
-                                    <CopyPlus size={15} />
-                                  </button>
-                                  <button
-                                    className="tree-action danger"
-                                    onClick={() => deleteFloor(floor.id)}
-                                    disabled={project.floors.length <= 1}
-                                    title={
-                                      project.floors.length <= 1
-                                        ? "A project needs at least one floor"
-                                        : `Delete ${floor.name}`
-                                    }
-                                  >
-                                    <Trash2 size={15} />
-                                  </button>
-                                </div>
-
-                                {floorExpanded && (
-                                  <div className="tree-children tree-children-alternatives">
-                                    {floor.alternatives.map((alternative) => (
-                                      <div className="tree-row tree-row-alternative" key={alternative.id}>
-                                        <button
-                                          className={
-                                            structureSelection?.type === "alternative" &&
-                                            structureSelection.id === alternative.id
-                                              ? "tree-node active"
-                                              : "tree-node"
-                                          }
-                                          onClick={() => selectTreeAlternative(project.id, floor.id, alternative.id)}
-                                        >
-                                          <span>{alternative.name}</span>
-                                        </button>
-                                        <button
-                                          className="tree-action danger"
-                                          onClick={() => deleteAlternative(floor.id, alternative.id)}
-                                          disabled={floor.alternatives.length <= 1}
-                                          title={
-                                            floor.alternatives.length <= 1
-                                              ? "A floor needs at least one alternative"
-                                              : `Delete ${alternative.name}`
-                                          }
-                                        >
-                                          <Trash2 size={15} />
-                                        </button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
+                      {floorExpanded && (
+                        <div className="tree-children tree-children-alternatives">
+                          {floor.alternatives.map((alternative) => (
+                            <div className="tree-row tree-row-alternative" key={alternative.id}>
+                              <button
+                                className={
+                                  structureSelection?.type === "alternative" &&
+                                  structureSelection.id === alternative.id
+                                    ? "tree-node active"
+                                    : "tree-node"
+                                }
+                                onClick={() => selectTreeAlternative(active.property!.id, floor.id, alternative.id)}
+                              >
+                                <span>{alternative.name}</span>
+                              </button>
+                              <button
+                                className="tree-action danger"
+                                onClick={() => deleteAlternative(floor.id, alternative.id)}
+                                disabled={floor.alternatives.length <= 1}
+                                title={
+                                  floor.alternatives.length <= 1
+                                    ? "A floor needs at least one alternative"
+                                    : `Delete ${alternative.name}`
+                                }
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
                   );
                 })}
+              </div>
+              <div className="file-actions">
+                <button onClick={() => active.property && addFloor(active.property.id)} disabled={!active.property}>
+                  <Plus size={17} />
+                  Add floor
+                </button>
               </div>
             </SidebarSection>
 
@@ -1419,18 +1722,14 @@ function App() {
             </SidebarSection>
 
             <SidebarSection
-              title="Project Data"
+              title="Project File"
               collapsed={Boolean(collapsedSections.data)}
               onToggle={() => toggleSection("data")}
             >
               <div className="file-actions">
-                <button onClick={() => downloadJson(projects)}>
+                <button onClick={() => active.property && downloadProjectJson(active.property)} disabled={!active.property}>
                   <Download size={17} />
-                  Export
-                </button>
-                <button onClick={() => jsonImportRef.current?.click()}>
-                  <Import size={17} />
-                  Import
+                  Export project
                 </button>
               </div>
             </SidebarSection>
@@ -1454,11 +1753,16 @@ function App() {
 
       <main className="workspace">
         <header className="topbar">
-          <div>
-            <h1>{active.property?.name ?? "Renovation Planner"}</h1>
-            <p>
-              {active.floor?.name} · {active.alternative?.name}
-            </p>
+          <div className="topbar-title">
+            <button className="back-button" type="button" onClick={backToProjects} aria-label="Back to projects">
+              <ArrowLeft size={17} />
+            </button>
+            <div>
+              <h1>{active.property?.name ?? "Renovation Planner"}</h1>
+              <p>
+                {active.floor?.name} · {active.alternative?.name}
+              </p>
+            </div>
           </div>
           <div className="view-tabs">
             <button className={view === "plan" ? "active" : ""} onClick={() => setView("plan")}>
@@ -1833,7 +2137,7 @@ function App() {
               </Stage>
             </div>
             <aside className="inspector">
-              <h2>Inspector</h2>
+              <h2>{inspectorTitle}</h2>
               {selectedRoom && plan ? (
                 <>
                   <label>
@@ -1871,24 +2175,6 @@ function App() {
                         onChange={(event) => updateSelectedRoomHeight(Number(event.target.value) / 100)}
                       />
                     </label>
-                    <label>
-                      Rotation
-                      <input
-                        type="number"
-                        step={1}
-                        value={Math.round(selectedRoom.rotation)}
-                        onChange={(event) => updateSelectedRotation(Number(event.target.value))}
-                      />
-                    </label>
-                  </div>
-                  <div className="angle-panel">
-                    <div className="angle-presets">
-                      {[0, 45, 90, 135].map((angle) => (
-                        <button key={angle} onClick={() => updateSelectedRotation(angle)}>
-                          {angle}°
-                        </button>
-                      ))}
-                    </div>
                   </div>
                   <div className="inspector-actions">
                     <button className="danger" onClick={deleteSelected}>
@@ -1945,37 +2231,6 @@ function App() {
                     <button className="danger" onClick={deleteSelected}>
                       <Trash2 size={16} />
                       Delete
-                    </button>
-                  </div>
-                </>
-              ) : activeStructure?.type === "project" ? (
-                <>
-                  <label>
-                    Project name
-                    <input
-                      value={activeStructure.property.name}
-                      onChange={(event) => updateActiveProjectName(event.target.value)}
-                    />
-                  </label>
-                  <div className="stats">
-                    <div>
-                      <span>Floors</span>
-                      <strong>{activeStructure.property.floors.length}</strong>
-                    </div>
-                    <div>
-                      <span>Alternatives</span>
-                      <strong>
-                        {activeStructure.property.floors.reduce(
-                          (total, floor) => total + floor.alternatives.length,
-                          0,
-                        )}
-                      </strong>
-                    </div>
-                  </div>
-                  <div className="inspector-actions">
-                    <button onClick={() => addFloor(activeStructure.property.id)}>
-                      <Plus size={16} />
-                      Add floor
                     </button>
                   </div>
                 </>
@@ -2050,7 +2305,7 @@ function App() {
               ) : (
                 <div className="empty-state">
                   <PencilRuler size={30} />
-                  <p>Select a project item or a plan object to edit it.</p>
+                  <p>Select a layout or a plan object to edit it.</p>
                 </div>
               )}
             </aside>
@@ -2168,7 +2423,7 @@ function App() {
         {view === "three" && plan && (
           <div className="three-shell">
             <Suspense fallback={<div className="walkthrough-help">Loading 3D preview...</div>}>
-              <ThreePreview plan={plan} />
+              <ThreePreview plan={plan} selectedId={selectedId} onSelect={setSelectedId} />
             </Suspense>
           </div>
         )}

@@ -1,4 +1,18 @@
-import type { Alternative, Asset, FixtureKind, Plan, PlanPoint, PropertyProject, Room, RoomBoard } from "./types";
+import type {
+  Alternative,
+  Asset,
+  FixtureKind,
+  Floor,
+  Plan,
+  PlanPoint,
+  PropertyProject,
+  PropertyType,
+  Room,
+  RoomBoard,
+} from "./types";
+
+export const LOCAL_OWNER_ID = "local-user";
+export const PROJECT_SCHEMA_VERSION = 1;
 
 export const fixtureLabels: Record<FixtureKind, string> = {
   counter: "Counter",
@@ -49,37 +63,209 @@ export function createRoomBoard(roomId: string): RoomBoard {
   return { roomId, photos: [], renderOutputs: [], prompts: [], notes: "" };
 }
 
+export function createPropertyProject(
+  name: string,
+  type: PropertyType = "Apartment",
+  floorName = type === "House" ? "Ground floor" : "Main floor",
+): PropertyProject {
+  const createdAt = nowIso();
+  return {
+    id: uid("property"),
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    ownerId: LOCAL_OWNER_ID,
+    name,
+    type,
+    createdAt,
+    updatedAt: createdAt,
+    floors: [
+      {
+        id: uid("floor"),
+        name: floorName,
+        level: 0,
+        alternatives: [createAlternative("Current layout")],
+      },
+    ],
+  };
+}
+
 export function createStarterProjects(): PropertyProject[] {
-  return [
-    {
-      id: uid("property"),
-      name: "Apartment",
-      type: "Apartment",
-      updatedAt: nowIso(),
-      floors: [
-        {
-          id: uid("floor"),
-          name: "Main floor",
-          level: 0,
-          alternatives: [createAlternative("Current layout")],
-        },
-      ],
+  return [createPropertyProject("Apartment", "Apartment"), createPropertyProject("House", "House")];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringOr(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function normalizeAsset(value: unknown): Asset | undefined {
+  if (!isRecord(value)) return undefined;
+  const dataUrl = stringOr(value.dataUrl, "");
+  if (!dataUrl) return undefined;
+  return {
+    id: stringOr(value.id, uid("asset")),
+    name: stringOr(value.name, "Imported asset"),
+    mimeType: stringOr(value.mimeType, "application/octet-stream"),
+    dataUrl,
+    createdAt: stringOr(value.createdAt, nowIso()),
+  };
+}
+
+function normalizeRoomBoard(value: unknown): RoomBoard | undefined {
+  if (!isRecord(value)) return undefined;
+  const roomId = stringOr(value.roomId, "");
+  if (!roomId) return undefined;
+  return {
+    roomId,
+    photos: Array.isArray(value.photos) ? value.photos.map(normalizeAsset).filter((asset): asset is Asset => Boolean(asset)) : [],
+    renderOutputs: Array.isArray(value.renderOutputs)
+      ? value.renderOutputs.map(normalizeAsset).filter((asset): asset is Asset => Boolean(asset))
+      : [],
+    prompts: Array.isArray(value.prompts) ? value.prompts.filter((prompt): prompt is string => typeof prompt === "string") : [],
+    notes: stringOr(value.notes, ""),
+  };
+}
+
+function normalizePlan(value: unknown): Plan {
+  const fallback = emptyPlan();
+  if (!isRecord(value)) return fallback;
+  const scale = isRecord(value.scale) ? value.scale : {};
+  return {
+    scale: {
+      ...fallback.scale,
+      ...scale,
+      pixelsPerMeter:
+        typeof scale.pixelsPerMeter === "number" && Number.isFinite(scale.pixelsPerMeter)
+          ? scale.pixelsPerMeter
+          : fallback.scale.pixelsPerMeter,
+      gridSize:
+        typeof scale.gridSize === "number" && Number.isFinite(scale.gridSize)
+          ? scale.gridSize
+          : fallback.scale.gridSize,
+      ceilingHeightMeters:
+        typeof scale.ceilingHeightMeters === "number" && Number.isFinite(scale.ceilingHeightMeters)
+          ? scale.ceilingHeightMeters
+          : fallback.scale.ceilingHeightMeters,
     },
-    {
-      id: uid("property"),
-      name: "House",
-      type: "House",
-      updatedAt: nowIso(),
-      floors: [
-        {
-          id: uid("floor"),
-          name: "Ground floor",
-          level: 0,
-          alternatives: [createAlternative("Current layout")],
-        },
-      ],
-    },
-  ];
+    background: normalizeAsset(value.background),
+    walls: Array.isArray(value.walls) ? (value.walls as Plan["walls"]) : [],
+    openings: Array.isArray(value.openings) ? (value.openings as Plan["openings"]) : [],
+    rooms: Array.isArray(value.rooms) ? (value.rooms as Plan["rooms"]) : [],
+    fixtures: Array.isArray(value.fixtures) ? (value.fixtures as Plan["fixtures"]) : [],
+  };
+}
+
+function normalizeAlternative(value: unknown, index: number): Alternative {
+  if (!isRecord(value)) return createAlternative(index === 0 ? "Current layout" : `Alternative ${index + 1}`);
+  return {
+    id: stringOr(value.id, uid("alternative")),
+    name: stringOr(value.name, index === 0 ? "Current layout" : `Alternative ${index + 1}`),
+    createdAt: stringOr(value.createdAt, nowIso()),
+    plan: normalizePlan(value.plan),
+    roomBoards: Array.isArray(value.roomBoards)
+      ? value.roomBoards.map(normalizeRoomBoard).filter((board): board is RoomBoard => Boolean(board))
+      : [],
+  };
+}
+
+function normalizeFloor(value: unknown, index: number): Floor {
+  if (!isRecord(value)) {
+    return {
+      id: uid("floor"),
+      name: index === 0 ? "Main floor" : `Floor ${index + 1}`,
+      level: index,
+      alternatives: [createAlternative("Current layout")],
+    };
+  }
+  const alternatives = Array.isArray(value.alternatives)
+    ? value.alternatives.map(normalizeAlternative)
+    : [createAlternative("Current layout")];
+  return {
+    id: stringOr(value.id, uid("floor")),
+    name: stringOr(value.name, index === 0 ? "Main floor" : `Floor ${index + 1}`),
+    level: typeof value.level === "number" && Number.isFinite(value.level) ? value.level : index,
+    alternatives: alternatives.length ? alternatives : [createAlternative("Current layout")],
+  };
+}
+
+export function normalizeProject(value: unknown): PropertyProject {
+  const fallback = createPropertyProject("Untitled project");
+  if (!isRecord(value)) return fallback;
+  const updatedAt = stringOr(value.updatedAt, nowIso());
+  const floors = Array.isArray(value.floors) ? value.floors.map(normalizeFloor) : fallback.floors;
+  return {
+    id: stringOr(value.id, fallback.id),
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    ownerId: stringOr(value.ownerId, LOCAL_OWNER_ID),
+    name: stringOr(value.name, fallback.name),
+    type: value.type === "House" ? "House" : "Apartment",
+    createdAt: stringOr(value.createdAt, updatedAt),
+    updatedAt,
+    floors: floors.length ? floors : fallback.floors,
+  };
+}
+
+function cloneAsset(asset: Asset): Asset {
+  return { ...asset, id: uid("asset") };
+}
+
+export function cloneProjectForLocal(source: PropertyProject, name = `${source.name} copy`): PropertyProject {
+  const normalized = normalizeProject(source);
+  const now = nowIso();
+  return {
+    ...normalized,
+    id: uid("property"),
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    ownerId: LOCAL_OWNER_ID,
+    name,
+    createdAt: now,
+    updatedAt: now,
+    floors: normalized.floors.map((floor, floorIndex) => ({
+      ...floor,
+      id: uid("floor"),
+      level: floorIndex,
+      alternatives: floor.alternatives.map((alternative) => {
+        const roomIds = new Map<string, string>();
+        const wallIds = new Map<string, string>();
+        const rooms = alternative.plan.rooms.map((room) => {
+          const id = uid("room");
+          roomIds.set(room.id, id);
+          return { ...room, id };
+        });
+        const walls = alternative.plan.walls.map((wall) => {
+          const id = uid("wall");
+          wallIds.set(wall.id, id);
+          return { ...wall, id };
+        });
+        return {
+          ...alternative,
+          id: uid("alternative"),
+          createdAt: now,
+          plan: {
+            ...alternative.plan,
+            background: alternative.plan.background ? cloneAsset(alternative.plan.background) : undefined,
+            walls,
+            openings: alternative.plan.openings.map((opening) => ({
+              ...opening,
+              id: uid(opening.kind),
+              wallId: opening.wallId ? wallIds.get(opening.wallId) : undefined,
+            })),
+            rooms,
+            fixtures: alternative.plan.fixtures.map((fixture) => ({ ...fixture, id: uid("fixture") })),
+          },
+          roomBoards: alternative.roomBoards.map((board) => ({
+            ...board,
+            roomId: roomIds.get(board.roomId) ?? board.roomId,
+            photos: board.photos.map(cloneAsset),
+            renderOutputs: board.renderOutputs.map(cloneAsset),
+            prompts: [...board.prompts],
+          })),
+        };
+      }),
+    })),
+  };
 }
 
 export function metersFromPixels(pixels: number, pixelsPerMeter: number) {
@@ -253,13 +439,48 @@ export function readFileAsDataUrl(file: File): Promise<Asset> {
   });
 }
 
-export async function downloadJson(projects: PropertyProject[]) {
-  const blob = new Blob([JSON.stringify({ version: 1, projects }, null, 2)], {
+function safeFilePart(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
+}
+
+async function downloadJsonFile(payload: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
   });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `renovation-planner-${new Date().toISOString().slice(0, 10)}.json`;
+  link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+export async function downloadProjectJson(project: PropertyProject) {
+  await downloadJsonFile(
+    {
+      version: 2,
+      kind: "renovation-planner-project",
+      project: normalizeProject(project),
+    },
+    `renovation-planner-${safeFilePart(project.name)}.json`,
+  );
+}
+
+export async function downloadProjectsJson(projects: PropertyProject[]) {
+  await downloadJsonFile(
+    {
+      version: 2,
+      kind: "renovation-planner-projects",
+      projects: projects.map(normalizeProject),
+    },
+    `renovation-planner-${new Date().toISOString().slice(0, 10)}.json`,
+  );
+}
+
+export function parseProjectExport(text: string): PropertyProject[] {
+  const parsed = JSON.parse(text) as unknown;
+  if (Array.isArray(parsed)) return parsed.map(normalizeProject);
+  if (!isRecord(parsed)) throw new Error("Project export must be a JSON object.");
+  if (Array.isArray(parsed.projects)) return parsed.projects.map(normalizeProject);
+  if (isRecord(parsed.project)) return [normalizeProject(parsed.project)];
+  throw new Error("Project export is missing a project or projects list.");
 }
