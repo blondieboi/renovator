@@ -1,4 +1,4 @@
-import type { Alternative, FixtureKind, Plan, PropertyProject, RoomBoard } from "./types";
+import type { Alternative, FixtureKind, Plan, PropertyProject, RoomBoard, ToolMode } from "./types";
 import { createRoomBoard } from "./utils";
 
 export const fixtureKinds: FixtureKind[] = [
@@ -23,6 +23,10 @@ export type SelectablePlanObject =
   | Plan["walls"][number];
 
 export type StructureSelection = { type: "project" | "floor" | "alternative"; id: string };
+
+export function isStructuralTool(mode: ToolMode) {
+  return mode === "wall" || mode === "room" || mode === "polyRoom" || mode === "door" || mode === "window";
+}
 
 export function defaultFixtureSize(kind: FixtureKind) {
   switch (kind) {

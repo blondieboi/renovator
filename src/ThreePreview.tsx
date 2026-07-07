@@ -20,6 +20,7 @@ function ThreePreview({
   const fitViewRef = useRef<((preset?: ViewPreset) => void) | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [viewPreset, setViewPreset] = useState<ViewPreset>("isometric");
+  const hasSelection = Boolean(selectedId);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -94,8 +95,9 @@ function ThreePreview({
       direction.normalize();
       yaw = Math.atan2(-direction.x, -direction.z);
     };
+    const activeFitBounds = () => builtScene.selectedBounds ?? builtScene.bounds;
     const fitWalkCamera = () => {
-      const box = builtScene.bounds;
+      const box = activeFitBounds();
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       const maxPlanSize = Math.max(size.x, size.z, 120);
@@ -107,7 +109,7 @@ function ThreePreview({
     };
 
     const fitCamera = (preset: ViewPreset = viewPreset) => {
-      const box = builtScene.bounds;
+      const box = activeFitBounds();
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       const maxPlanSize = Math.max(size.x, size.z, 120);
@@ -276,7 +278,12 @@ function ThreePreview({
         <button type="button" onClick={() => applyPreset("top")} aria-label="Top view" title="Top view">
           <Eye size={16} />
         </button>
-        <button type="button" onClick={fitOrbitView} aria-label="Fit view" title="Fit view">
+        <button
+          type="button"
+          onClick={fitOrbitView}
+          aria-label={hasSelection ? "Fit selected object" : "Fit view"}
+          title={hasSelection ? "Fit selected object" : "Fit view"}
+        >
           <Maximize2 size={16} />
         </button>
         <button

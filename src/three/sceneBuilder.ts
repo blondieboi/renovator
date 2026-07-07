@@ -16,6 +16,7 @@ export interface BuiltPlanScene {
   root: THREE.Group;
   topology: PlanTopology;
   bounds: THREE.Box3;
+  selectedBounds?: THREE.Box3;
   transform: PlanToWorldTransform;
 }
 
@@ -279,13 +280,23 @@ export function buildPlanScene(plan: Plan, selectedId?: string): BuiltPlanScene 
   plan.fixtures.forEach((fixture) => buildFixture(root, fixture, transform, materials.fixture, selectedId));
 
   const bounds = new THREE.Box3();
+  const selectedBounds = selectedId ? new THREE.Box3() : undefined;
   root.traverse((object) => {
     if (object.userData.ignoreForFit) return;
     if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
       bounds.expandByObject(object);
+      if (selectedBounds && object.userData.planObjectId === selectedId) {
+        selectedBounds.expandByObject(object);
+      }
     }
   });
   if (bounds.isEmpty()) bounds.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(180, 80, 180));
 
-  return { root, topology, bounds, transform };
+  return {
+    root,
+    topology,
+    bounds,
+    selectedBounds: selectedBounds && !selectedBounds.isEmpty() ? selectedBounds : undefined,
+    transform,
+  };
 }
