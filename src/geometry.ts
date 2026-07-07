@@ -1,6 +1,40 @@
 import type { Opening, Plan, PlanPoint, Wall } from "./types";
 
 export type OpeningAnchor = "start" | "center" | "end";
+export type SnapKind = "free" | "grid" | "endpoint" | "polar" | "wall-axis";
+
+export interface ActiveSnap {
+  kind: "opening-wall" | "wall-endpoint";
+  wallId: string;
+  endpoint?: "start" | "end";
+}
+
+export interface SnapCandidate {
+  kind: SnapKind;
+  point: PlanPoint;
+  distance: number;
+  wallId?: string;
+  endpoint?: "start" | "end";
+  angle?: number;
+}
+
+export interface SnapResult extends SnapCandidate {
+  guideStart?: PlanPoint;
+  guideEnd?: PlanPoint;
+  activeSnap?: ActiveSnap;
+}
+
+const polarAngleStep = 45;
+const endpointAngleTolerance = 3;
+const openingWallSwitchMarginPx = 6;
+
+export function snapAcquireTolerance(viewportScale: number, screenPixels = 10) {
+  return screenPixels / Math.max(0.2, viewportScale);
+}
+
+export function snapReleaseTolerance(viewportScale: number, screenPixels = 16) {
+  return screenPixels / Math.max(0.2, viewportScale);
+}
 
 export function snapThreshold(gridSize: number) {
   return Math.max(8, gridSize * 0.5);
@@ -16,6 +50,55 @@ export function wallAngle(wall: Wall) {
 
 export function normalizeAngle(angle: number) {
   return ((angle % 360) + 360) % 360;
+}
+
+function angleDelta(a: number, b: number) {
+  const delta = Math.abs(normalizeAngle(a) - normalizeAngle(b));
+  return Math.min(delta, 360 - delta);
+}
+
+function nearestPolarAngle(angle: number) {
+  return normalizeAngle(Math.round(angle / polarAngleStep) * polarAngleStep);
+}
+
+function angleBetween(start: PlanPoint, end: PlanPoint) {
+  return (Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI;
+}
+
+function wallEndpointPoint(wall: Wall, endpoint: "start" | "end"): PlanPoint {
+  return endpoint === "start" ? { x: wall.x, y: wall.y } : { x: wall.x2, y: wall.y2 };
+}
+
+function wallLength(wall: Wall) {
+  return Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y);
+}
+
+function wallAxisProjection(point: PlanPoint, wall: Wall) {
+  const length = wallLength(wall);
+  if (length <= 0) {
+    return {
+      point: { x: wall.x, y: wall.y },
+      distance: distance(point, { x: wall.x, y: wall.y }),
+      along: 0,
+      outsideDistance: 0,
+    };
+  }
+  const axis = {
+    x: (wall.x2 - wall.x) / length,
+    y: (wall.y2 - wall.y) / length,
+  };
+  const along = (point.x - wall.x) * axis.x + (point.y - wall.y) * axis.y;
+  const clampedAlong = Math.max(0, Math.min(length, along));
+  const projected = {
+    x: wall.x + axis.x * clampedAlong,
+    y: wall.y + axis.y * clampedAlong,
+  };
+  return {
+    point: projected,
+    distance: distance(point, projected),
+    along,
+    outsideDistance: Math.max(0, -along, along - length),
+  };
 }
 
 export function snapPointToGrid(point: PlanPoint, gridSize: number): PlanPoint {
@@ -83,6 +166,118 @@ export function snapStructuralPoint(point: PlanPoint, walls: Wall[], gridSize: n
   const wall = nearestWallProjection(point, walls, threshold, excludeWallId);
   if (wall) return wall.point;
   return snapPointToGrid(point, gridSize);
+}
+
+function wallEndpointCandidates(point: PlanPoint, walls: Wall[], threshold: number, excludeWallId?: string) {
+  return walls.flatMap((wall) => {
+    if (wall.id === excludeWallId) return [];
+    return (["start", "end"] as const)
+      .map((endpoint) => {
+        const endpointPoint = wallEndpointPoint(wall, endpoint);
+        return {
+          kind: "endpoint" as const,
+          point: endpointPoint,
+          distance: distance(point, endpointPoint),
+          wallId: wall.id,
+          endpoint,
+        };
+      })
+      .filter((candidate) => candidate.distance <= threshold);
+  });
+}
+
+function isAngleCompatibleEndpoint(origin: PlanPoint, target: PlanPoint) {
+  const angle = angleBetween(origin, target);
+  return angleDelta(angle, nearestPolarAngle(angle)) <= endpointAngleTolerance;
+}
+
+function resolveActiveEndpointSnap(
+  point: PlanPoint,
+  origin: PlanPoint,
+  walls: Wall[],
+  activeSnap: ActiveSnap | undefined,
+  releaseTolerance: number,
+) {
+  if (!activeSnap || activeSnap.kind !== "wall-endpoint" || !activeSnap.endpoint) return;
+  const wall = walls.find((item) => item.id === activeSnap.wallId);
+  if (!wall) return;
+  const endpointPoint = wallEndpointPoint(wall, activeSnap.endpoint);
+  const endpointDistance = distance(point, endpointPoint);
+  if (endpointDistance > releaseTolerance || !isAngleCompatibleEndpoint(origin, endpointPoint)) return;
+  return {
+    kind: "endpoint" as const,
+    point: endpointPoint,
+    distance: endpointDistance,
+    wallId: wall.id,
+    endpoint: activeSnap.endpoint,
+    angle: nearestPolarAngle(angleBetween(origin, endpointPoint)),
+    guideStart: origin,
+    guideEnd: endpointPoint,
+    activeSnap,
+  };
+}
+
+export function resolveWallEndpointSnap(options: {
+  point: PlanPoint;
+  origin: PlanPoint;
+  walls: Wall[];
+  gridSize: number;
+  viewportScale: number;
+  excludeWallId?: string;
+  activeSnap?: ActiveSnap;
+  snappingDisabled?: boolean;
+}): SnapResult {
+  const { point, origin, walls, gridSize, viewportScale, excludeWallId, activeSnap, snappingDisabled } = options;
+  if (snappingDisabled) {
+    return { kind: "free", point, distance: 0 };
+  }
+
+  const releaseTolerance = snapReleaseTolerance(viewportScale);
+  const activeEndpoint = resolveActiveEndpointSnap(point, origin, walls, activeSnap, releaseTolerance);
+  if (activeEndpoint) return activeEndpoint;
+
+  const acquireTolerance = snapAcquireTolerance(viewportScale);
+  const compatibleEndpoint = wallEndpointCandidates(point, walls, acquireTolerance, excludeWallId)
+    .filter((candidate) => isAngleCompatibleEndpoint(origin, candidate.point))
+    .sort((a, b) => a.distance - b.distance)[0];
+  if (compatibleEndpoint) {
+    return {
+      ...compatibleEndpoint,
+      angle: nearestPolarAngle(angleBetween(origin, compatibleEndpoint.point)),
+      guideStart: origin,
+      guideEnd: compatibleEndpoint.point,
+      activeSnap: {
+        kind: "wall-endpoint",
+        wallId: compatibleEndpoint.wallId,
+        endpoint: compatibleEndpoint.endpoint,
+      },
+    };
+  }
+
+  const rawDistance = distance(origin, point);
+  if (rawDistance > 0.001) {
+    const angle = nearestPolarAngle(angleBetween(origin, point));
+    const radians = (angle * Math.PI) / 180;
+    const polarPoint = {
+      x: origin.x + Math.cos(radians) * rawDistance,
+      y: origin.y + Math.sin(radians) * rawDistance,
+    };
+    return {
+      kind: "polar",
+      point: polarPoint,
+      distance: distance(point, polarPoint),
+      angle,
+      guideStart: origin,
+      guideEnd: polarPoint,
+    };
+  }
+
+  const gridPoint = snapPointToGrid(point, gridSize);
+  return {
+    kind: "grid",
+    point: gridPoint,
+    distance: distance(point, gridPoint),
+  };
 }
 
 export function openingCenter(opening: Opening): PlanPoint {
@@ -205,6 +400,55 @@ export function nearestOpeningWall(opening: Opening, walls: Wall[], threshold: n
   }, undefined);
 }
 
+function openingWallCandidate(opening: Opening, wall: Wall, threshold: number) {
+  const center = openingCenter(opening);
+  const projection = wallAxisProjection(center, wall);
+  const wallPadding = Math.max(opening.width / 2, wall.thickness);
+  if (projection.distance > threshold || projection.outsideDistance > wallPadding) return;
+  return {
+    kind: "wall-axis" as const,
+    point: projection.point,
+    distance: projection.distance,
+    wallId: wall.id,
+    angle: wallAngle(wall),
+    score: projection.distance + projection.outsideDistance * 0.75,
+    activeSnap: { kind: "opening-wall" as const, wallId: wall.id },
+  };
+}
+
+export function resolveOpeningWallSnap(options: {
+  opening: Opening;
+  walls: Wall[];
+  viewportScale: number;
+  activeSnap?: ActiveSnap;
+}) {
+  const { opening, walls, viewportScale, activeSnap } = options;
+  const acquireTolerance = snapAcquireTolerance(viewportScale);
+  const releaseTolerance = snapReleaseTolerance(viewportScale);
+  const switchMargin = snapAcquireTolerance(viewportScale, openingWallSwitchMarginPx);
+  const candidates = walls
+    .map((wall) => openingWallCandidate(opening, wall, releaseTolerance))
+    .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    .sort((a, b) => a.score - b.score);
+
+  const activeCandidate =
+    activeSnap?.kind === "opening-wall"
+      ? candidates.find((candidate) => candidate.wallId === activeSnap.wallId)
+      : opening.wallId
+        ? candidates.find((candidate) => candidate.wallId === opening.wallId)
+        : undefined;
+  const best = candidates[0];
+
+  if (activeCandidate && activeCandidate.distance <= releaseTolerance) {
+    if (!best || best.wallId === activeCandidate.wallId || best.score + switchMargin >= activeCandidate.score) {
+      return activeCandidate;
+    }
+  }
+
+  if (!best || best.distance > acquireTolerance) return undefined;
+  return best;
+}
+
 export function constrainOpeningHandle(
   opening: Opening,
   endpoint: "start" | "end",
@@ -212,16 +456,18 @@ export function constrainOpeningHandle(
   walls: Wall[],
   gridSize: number,
   snappingDisabled: boolean,
+  viewportScale = 1,
+  activeSnap?: ActiveSnap,
 ) {
   const handles = openingHandlePoints(opening);
   const fixed = endpoint === "start" ? handles.end : handles.start;
   const attachedWall = walls.find((wall) => wall.id === opening.wallId);
-  const threshold = snapThreshold(gridSize);
+  const threshold = snapAcquireTolerance(viewportScale);
   const resizeWall =
     !snappingDisabled && attachedWall
       ? attachedWall
       : !snappingDisabled
-        ? nearestOpeningWall(opening, walls, threshold)?.wall
+        ? walls.find((wall) => wall.id === resolveOpeningWallSnap({ opening, walls, viewportScale, activeSnap })?.wallId)
         : undefined;
 
   if (resizeWall) {
@@ -231,6 +477,7 @@ export function constrainOpeningHandle(
       fixed: projectPointToWallAxis(fixed, resizeWall),
       rotation: wallAngle(resizeWall),
       wallId: resizeWall.id,
+      activeSnap: { kind: "opening-wall" as const, wallId: resizeWall.id },
     };
   }
   return {
@@ -238,6 +485,7 @@ export function constrainOpeningHandle(
     fixed,
     rotation: opening.rotation,
     wallId: undefined,
+    activeSnap: undefined,
   };
 }
 
@@ -247,20 +495,23 @@ export function constrainedOpeningPosition(
   y: number,
   plan: Plan,
   snappingDisabled: boolean,
+  viewportScale = 1,
+  activeSnap?: ActiveSnap,
 ) {
   const nextOpening = { ...opening, x, y };
   if (snappingDisabled) {
-    return { x, y, rotation: nextOpening.rotation, wallId: undefined };
+    return { x, y, rotation: nextOpening.rotation, wallId: undefined, activeSnap: undefined };
   }
-  const nearest = nearestOpeningWall(nextOpening, plan.walls, snapThreshold(plan.scale.gridSize) * 1.5);
+  const nearest = resolveOpeningWallSnap({ opening: nextOpening, walls: plan.walls, viewportScale, activeSnap });
   if (!nearest) {
-    return { x, y, rotation: nextOpening.rotation, wallId: undefined };
+    return { x, y, rotation: nextOpening.rotation, wallId: undefined, activeSnap: undefined };
   }
-  placeOpeningAnchorAtPoint(nextOpening, nearest.anchor, nearest.point, wallAngle(nearest.wall));
+  placeOpeningAtCenter(nextOpening, nearest.point, nearest.angle ?? nextOpening.rotation);
   return {
     x: nextOpening.x,
     y: nextOpening.y,
     rotation: nextOpening.rotation,
-    wallId: nearest.wall.id,
+    wallId: nearest.wallId,
+    activeSnap: nearest.activeSnap,
   };
 }

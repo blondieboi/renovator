@@ -773,6 +773,7 @@ textarea {
 
 .icon-button,
 .tool,
+.structure-lock-button,
 .file-actions button,
 .view-tabs button,
 .inspector-actions button,
@@ -793,6 +794,7 @@ textarea {
 
 .icon-button svg,
 .tool svg,
+.structure-lock-button svg,
 .file-actions button svg,
 .view-tabs button svg,
 .inspector-actions button svg,
@@ -802,6 +804,7 @@ textarea {
 }
 
 .tool svg,
+.structure-lock-button svg,
 .view-tabs button svg,
 .file-actions button svg,
 .inspector-actions button svg {
@@ -844,6 +847,19 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.structure-lock-button {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 38px;
+}
+
+.structure-lock-button.active {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-dark);
+  box-shadow: inset 3px 0 0 var(--green);
 }
 
 .tool-section .tool-grid:has(.tool:only-child) {
@@ -1057,6 +1073,12 @@ textarea {
   border-radius: 7px;
   background: #ffffff;
   color: var(--ink);
+}
+
+.canvas-control-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--line-strong);
 }
 
 .canvas-controls span {

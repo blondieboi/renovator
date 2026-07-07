@@ -17,6 +17,7 @@ import {
   ImagePlus,
   Import,
   Layers3,
+  Lock,
   Maximize2,
   MousePointer2,
   PanelLeftClose,
@@ -27,6 +28,8 @@ import {
   Ruler,
   Square,
   Trash2,
+  Undo2,
+  Unlock,
   Upload,
   X,
   ZoomIn,
@@ -41,17 +44,17 @@ import RoomGallery from "./components/RoomGallery";
 import SidebarSection from "./components/SidebarSection";
 import { loadProjects, saveProjects } from "./db";
 import {
+  type ActiveSnap,
   constrainOpeningHandle,
   constrainedOpeningPosition,
   distance,
-  nearestOpeningWall,
   normalizeAngle,
   openingHandlePoints,
-  placeOpeningAnchorAtPoint,
   placeOpeningBetweenHandles,
+  resolveOpeningWallSnap,
+  resolveWallEndpointSnap,
   snapPointToGrid,
   snapStructuralPoint,
-  snapThreshold,
   wallAngle,
 } from "./geometry";
 import { loadImage, useHtmlImage } from "./image";
@@ -109,6 +112,25 @@ import {
 const ThreePreview = lazy(() => import("./ThreePreview"));
 
 type AppScreen = "projects" | "editor";
+type PlanUndoMode = "record" | "skip";
+type PlanUndoSnapshot = {
+  projects: PropertyProject[];
+  activePropertyId: string;
+  activeFloorId: string;
+  activeAlternativeId: string;
+  selectedId: string | null;
+  structureSelection: StructureSelection | null;
+};
+type CanvasSnapPreview = {
+  openingWallId?: string;
+  wallGuide?: {
+    start: PlanPoint;
+    end: PlanPoint;
+    point: PlanPoint;
+  };
+};
+
+const planUndoLimit = 50;
 
 const toolGroups: Array<{
   title: string;
@@ -145,6 +167,14 @@ const toolGroups: Array<{
 
 function isFixtureObject(object: SelectablePlanObject): object is Fixture {
   return !("x2" in object) && object.kind !== "room" && object.kind !== "door" && object.kind !== "window";
+}
+
+function isStructuralObject(object: SelectablePlanObject) {
+  return object.kind === "room" || object.kind === "wall" || object.kind === "door" || object.kind === "window";
+}
+
+function isStructuralTool(mode: ToolMode) {
+  return mode === "wall" || mode === "room" || mode === "polyRoom" || mode === "door" || mode === "window";
 }
 
 function isQuarterTurn(rotation: number) {
@@ -233,6 +263,7 @@ function App() {
   const [tool, setTool] = useState<ToolMode>("select");
   const [fixtureKind, setFixtureKind] = useState<FixtureKind>("counter");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [structureLocked, setStructureLocked] = useState(false);
   const [structureSelection, setStructureSelection] = useState<StructureSelection | null>(null);
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Record<string, boolean>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -247,6 +278,8 @@ function App() {
   const [calibrationPoints, setCalibrationPoints] = useState<PlanPoint[]>([]);
   const [calibrationCentimeters, setCalibrationCentimeters] = useState("100");
   const [spacePanning, setSpacePanning] = useState(false);
+  const [planUndoStack, setPlanUndoStack] = useState<PlanUndoSnapshot[]>([]);
+  const [snapPreview, setSnapPreview] = useState<CanvasSnapPreview>({});
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
     project: false,
     data: true,
@@ -254,6 +287,8 @@ function App() {
   const canvasShellRef = useRef<HTMLDivElement>(null);
   const panLastRef = useRef<{ x: number; y: number } | null>(null);
   const snappingDisabledRef = useRef(false);
+  const activeOpeningSnapRef = useRef<ActiveSnap | undefined>(undefined);
+  const activeWallEndpointSnapRef = useRef<ActiveSnap | undefined>(undefined);
   const importRef = useRef<HTMLInputElement>(null);
   const jsonImportRef = useRef<HTMLInputElement>(null);
 
@@ -298,12 +333,25 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       snappingDisabledRef.current = event.altKey;
+      if (event.altKey) clearSnapState();
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT";
       if (event.code === "Space" && !isTyping) {
         event.preventDefault();
         setSpacePanning(true);
+      }
+      if (
+        appScreen === "editor" &&
+        view === "plan" &&
+        !isTyping &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "z"
+      ) {
+        event.preventDefault();
+        undoLastPlanChange();
+        return;
       }
       if (tool !== "polyRoom") return;
       if (event.key === "Enter") {
@@ -325,6 +373,7 @@ function App() {
     };
     const handleBlur = () => {
       snappingDisabledRef.current = false;
+      clearSnapState();
     };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
@@ -334,7 +383,11 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [polygonDraft, tool]);
+  }, [activeAlternativeId, appScreen, planUndoStack, polygonDraft, tool, view]);
+
+  useEffect(() => {
+    clearSnapState();
+  }, [activeAlternativeId, tool, view]);
 
   useEffect(() => {
     if (!previewAsset) return;
@@ -391,7 +444,7 @@ function App() {
       alternative.plan.scale.backgroundY = 20;
       alternative.plan.scale.backgroundWidth = width;
       alternative.plan.scale.backgroundHeight = height;
-    });
+    }, "skip");
   }, [active.alternative?.id, backgroundImage, stageSize.width]);
 
   function updateProjects(updater: (draft: PropertyProject[]) => PropertyProject[]) {
@@ -403,7 +456,37 @@ function App() {
     return findActiveProject(draft, activePropertyId, activeFloorId, activeAlternativeId);
   }
 
-  function updateAlternative(updater: (alternative: Alternative) => void) {
+  function recordPlanUndoSnapshot() {
+    if (!active.alternative) return;
+    const snapshot: PlanUndoSnapshot = {
+      projects: structuredClone(projects),
+      activePropertyId,
+      activeFloorId,
+      activeAlternativeId,
+      selectedId,
+      structureSelection: structureSelection ? { ...structureSelection } : null,
+    };
+    setPlanUndoStack((current) => [...current.slice(-(planUndoLimit - 1)), snapshot]);
+  }
+
+  function undoLastPlanChange() {
+    const snapshot = planUndoStack[planUndoStack.length - 1];
+    if (!snapshot || snapshot.activeAlternativeId !== activeAlternativeId) return;
+    setPlanUndoStack((current) => current.slice(0, -1));
+    setStatus("Saving...");
+    setProjects(structuredClone(snapshot.projects));
+    setActivePropertyId(snapshot.activePropertyId);
+    setActiveFloorId(snapshot.activeFloorId);
+    setActiveAlternativeId(snapshot.activeAlternativeId);
+    setSelectedId(snapshot.selectedId);
+    setStructureSelection(snapshot.structureSelection);
+    setPolygonDraft([]);
+    setCalibrationPoints([]);
+    setTool("select");
+  }
+
+  function updateAlternative(updater: (alternative: Alternative) => void, undoMode: PlanUndoMode = "record") {
+    if (undoMode === "record") recordPlanUndoSnapshot();
     updateProjects((draft) => {
       const { property, alternative } = findActiveDraft(draft);
       if (property && alternative) {
@@ -801,7 +884,38 @@ function App() {
     };
   }
 
+  function clearSnapState() {
+    activeOpeningSnapRef.current = undefined;
+    activeWallEndpointSnapRef.current = undefined;
+    setSnapPreview({});
+  }
+
+  function selectPlanObject(id: string | null) {
+    if (!id) {
+      setSelectedId(null);
+      return;
+    }
+    const currentPlan = active.alternative?.plan;
+    const object = currentPlan ? findPlanObject(currentPlan, id) : undefined;
+    if (structureLocked && object && isStructuralObject(object)) return;
+    setSelectedId(id);
+  }
+
+  function toggleStructureLock() {
+    const nextLocked = !structureLocked;
+    setStructureLocked(nextLocked);
+    if (!nextLocked) return;
+    const currentSelection = selectedObject();
+    if (currentSelection && isStructuralObject(currentSelection)) setSelectedId(null);
+    if (isStructuralTool(tool)) {
+      setTool("select");
+      setPolygonDraft([]);
+    }
+    clearSnapState();
+  }
+
   function finishPolygonRoom(points = polygonDraft) {
+    if (structureLocked) return;
     if (points.length < 3) return;
     if (!isSimplePolygon(points)) {
       setStatus("Room polygon needs a simple, non-overlapping outline.");
@@ -841,6 +955,11 @@ function App() {
     }
     if (tool === "select") {
       if (event.target === event.target.getStage()) setSelectedId(null);
+      return;
+    }
+    if (structureLocked && isStructuralTool(tool)) {
+      setTool("select");
+      setPolygonDraft([]);
       return;
     }
     const snappingDisabled = event.evt.altKey;
@@ -1025,28 +1144,51 @@ function App() {
   }
 
   function snapOpeningToWall(opening: Opening, plan: Alternative["plan"]) {
-    const nearest = nearestOpeningWall(opening, plan.walls, snapThreshold(safeGridSize(plan)) * 1.5);
+    const nearest = resolveOpeningWallSnap({ opening, walls: plan.walls, viewportScale: viewport.scale });
     if (!nearest) {
       opening.wallId = undefined;
       return;
     }
-    opening.wallId = nearest.wall.id;
-    placeOpeningAnchorAtPoint(opening, nearest.anchor, nearest.point, wallAngle(nearest.wall));
+    const constrained = constrainedOpeningPosition(opening, opening.x, opening.y, plan, false, viewport.scale);
+    opening.x = constrained.x;
+    opening.y = constrained.y;
+    opening.rotation = constrained.rotation;
+    opening.wallId = constrained.wallId;
   }
 
-  function moveOpening(id: string, x: number, y: number, snappingDisabled: boolean) {
+  function moveOpening(id: string, x: number, y: number, snappingDisabled: boolean, undoMode: PlanUndoMode = "record") {
+    if (structureLocked) return;
+    if (snappingDisabled) clearSnapState();
     updateAlternative((alternative) => {
       const opening = alternative.plan.openings.find((item) => item.id === id);
       if (!opening) return;
-      const constrained = constrainedOpeningPosition(opening, x, y, alternative.plan, snappingDisabled);
+      const constrained = constrainedOpeningPosition(
+        opening,
+        x,
+        y,
+        alternative.plan,
+        snappingDisabled,
+        viewport.scale,
+        activeOpeningSnapRef.current,
+      );
       opening.x = constrained.x;
       opening.y = constrained.y;
       opening.rotation = constrained.rotation;
       opening.wallId = constrained.wallId;
-    });
+      activeOpeningSnapRef.current = constrained.activeSnap;
+      setSnapPreview((current) => ({ ...current, openingWallId: constrained.wallId, wallGuide: undefined }));
+    }, undoMode);
   }
 
-  function resizeOpening(id: string, endpoint: "start" | "end", point: PlanPoint, snappingDisabled: boolean) {
+  function resizeOpening(
+    id: string,
+    endpoint: "start" | "end",
+    point: PlanPoint,
+    snappingDisabled: boolean,
+    undoMode: PlanUndoMode = "record",
+  ) {
+    if (structureLocked) return;
+    if (snappingDisabled) clearSnapState();
     updateAlternative((alternative) => {
       const opening = alternative.plan.openings.find((item) => item.id === id);
       if (!opening) return;
@@ -1057,16 +1199,21 @@ function App() {
         alternative.plan.walls,
         safeGridSize(alternative.plan),
         snappingDisabled,
+        viewport.scale,
+        activeOpeningSnapRef.current,
       );
 
       opening.wallId = constrained.wallId;
       const start = endpoint === "start" ? constrained.point : constrained.fixed;
       const end = endpoint === "end" ? constrained.point : constrained.fixed;
       placeOpeningBetweenHandles(opening, start, end, constrained.rotation);
-    });
+      activeOpeningSnapRef.current = constrained.activeSnap;
+      setSnapPreview((current) => ({ ...current, openingWallId: constrained.wallId, wallGuide: undefined }));
+    }, undoMode);
   }
 
-  function moveWall(id: string, x: number, y: number, snappingDisabled: boolean) {
+  function moveWall(id: string, x: number, y: number, snappingDisabled: boolean, undoMode: PlanUndoMode = "record") {
+    if (structureLocked) return;
     updateAlternative((alternative) => {
       const wall = alternative.plan.walls.find((item) => item.id === id);
       if (!wall) return;
@@ -1093,18 +1240,46 @@ function App() {
       wall.y += offset.y;
       wall.x2 += offset.x;
       wall.y2 += offset.y;
-    });
+    }, undoMode);
   }
 
-  function moveWallEndpoint(id: string, endpoint: "start" | "end", point: PlanPoint, snappingDisabled: boolean) {
+  function moveWallEndpoint(
+    id: string,
+    endpoint: "start" | "end",
+    point: PlanPoint,
+    snappingDisabled: boolean,
+    undoMode: PlanUndoMode = "record",
+  ) {
+    if (structureLocked) return;
     updateAlternative((alternative) => {
       const wall = alternative.plan.walls.find((item) => item.id === id);
       if (!wall) return;
       const topology = derivePlanTopology(alternative.plan);
       const connectedJoint = snappingDisabled ? undefined : findWallEndpointJoint(topology, id, endpoint);
-      const nextPoint = snappingDisabled
-        ? point
-        : snapStructuralPoint(point, alternative.plan.walls, safeGridSize(alternative.plan), wall.id);
+      const origin =
+        endpoint === "start"
+          ? { x: wall.x2, y: wall.y2 }
+          : { x: wall.x, y: wall.y };
+      const resolved = resolveWallEndpointSnap({
+        point,
+        origin,
+        walls: alternative.plan.walls,
+        gridSize: safeGridSize(alternative.plan),
+        viewportScale: viewport.scale,
+        excludeWallId: wall.id,
+        activeSnap: activeWallEndpointSnapRef.current,
+        snappingDisabled,
+      });
+      const nextPoint = resolved.point;
+      activeWallEndpointSnapRef.current = resolved.activeSnap;
+      setSnapPreview((current) => ({
+        ...current,
+        openingWallId: undefined,
+        wallGuide:
+          resolved.guideStart && resolved.guideEnd
+            ? { start: resolved.guideStart, end: resolved.guideEnd, point: resolved.point }
+            : undefined,
+      }));
       const endpointsToMove = connectedJoint?.endpoints ?? [{ wallId: id, endpoint }];
       endpointsToMove.forEach((target) => {
         const targetWall = alternative.plan.walls.find((item) => item.id === target.wallId);
@@ -1120,17 +1295,24 @@ function App() {
         targetWall.width = width;
         targetWall.rotation = wallAngle(targetWall);
       });
-    });
+    }, undoMode);
   }
 
-  function moveRectangularObject(id: string, x: number, y: number, snappingDisabled: boolean) {
+  function moveRectangularObject(
+    id: string,
+    x: number,
+    y: number,
+    snappingDisabled: boolean,
+    undoMode: PlanUndoMode = "record",
+  ) {
+    if (structureLocked && active.alternative?.plan.rooms.some((room) => room.id === id)) return;
     updateAlternative((alternative) => {
       const object = [...alternative.plan.rooms, ...alternative.plan.fixtures].find((item) => item.id === id);
       if (!object) return;
       const nextPoint = snappingDisabled ? { x, y } : snapPointToGrid({ x, y }, safeGridSize(alternative.plan));
       object.x = nextPoint.x;
       object.y = nextPoint.y;
-    });
+    }, undoMode);
   }
 
   function normalizeRoom(room: Room) {
@@ -1146,7 +1328,14 @@ function App() {
     room.points = points.map((point) => ({ x: point.x - minX, y: point.y - minY }));
   }
 
-  function moveRoomPoint(roomId: string, pointIndex: number, absolutePoint: PlanPoint, snappingDisabled: boolean) {
+  function moveRoomPoint(
+    roomId: string,
+    pointIndex: number,
+    absolutePoint: PlanPoint,
+    snappingDisabled: boolean,
+    undoMode: PlanUndoMode = "record",
+  ) {
+    if (structureLocked) return;
     updateAlternative((alternative) => {
       const room = alternative.plan.rooms.find((item) => item.id === roomId);
       if (!room) return;
@@ -1163,21 +1352,27 @@ function App() {
       }
       room.points = nextPoints;
       normalizeRoom(room);
-    });
+    }, undoMode);
   }
 
-  function moveRoomPointFromPointer(room: Room, pointIndex: number, event: KonvaEventObject<DragEvent>) {
+  function moveRoomPointFromPointer(
+    room: Room,
+    pointIndex: number,
+    event: KonvaEventObject<DragEvent>,
+    undoMode: PlanUndoMode = "record",
+  ) {
     const pointer = event.target.getStage()?.getPointerPosition();
     if (!pointer) return;
     const planPoint = {
       x: (pointer.x - viewport.x) / viewport.scale,
       y: (pointer.y - viewport.y) / viewport.scale,
     };
-    moveRoomPoint(room.id, pointIndex, planPoint, event.evt.altKey);
+    moveRoomPoint(room.id, pointIndex, planPoint, event.evt.altKey, undoMode);
   }
 
   function updateSelectedRotation(value: number) {
     if (!selectedId || Number.isNaN(value)) return;
+    if (isSelectedObjectLocked()) return;
     updateAlternative((alternative) => {
       const object = findPlanObject(alternative.plan, selectedId);
       if (!object) return;
@@ -1195,6 +1390,7 @@ function App() {
 
   function deleteSelected() {
     if (!selectedId) return;
+    if (isSelectedObjectLocked()) return;
     updateAlternative((alternative) => {
       const plan = alternative.plan;
       plan.walls = plan.walls.filter((item) => item.id !== selectedId);
@@ -1212,8 +1408,14 @@ function App() {
     return findPlanObject(plan, selectedId);
   }
 
+  function isSelectedObjectLocked() {
+    const object = selectedObject();
+    return Boolean(structureLocked && object && isStructuralObject(object));
+  }
+
   function updateSelectedName(name: string) {
     if (!selectedId) return;
+    if (isSelectedObjectLocked()) return;
     updateAlternative((alternative) => {
       const object = findPlanObject(alternative.plan, selectedId);
       if (object) object.name = name;
@@ -1222,6 +1424,7 @@ function App() {
 
   function updateSelectedDimension(dimension: "width" | "height", value: number) {
     if (!selectedId || Number.isNaN(value)) return;
+    if (isSelectedObjectLocked()) return;
     updateAlternative((alternative) => {
       const object = findPlanObject(alternative.plan, selectedId);
       if (!object) return;
@@ -1273,6 +1476,7 @@ function App() {
 
   function updateSelectedRoomHeight(value: number) {
     if (!selectedId || Number.isNaN(value)) return;
+    if (isSelectedObjectLocked()) return;
     updateAlternative((alternative) => {
       const room = alternative.plan.rooms.find((item) => item.id === selectedId);
       if (room) room.ceilingHeightMeters = Math.max(0.1, value);
@@ -1285,14 +1489,14 @@ function App() {
     updateAlternative((alternative) => {
       const board = getOrCreateRoomBoard(alternative, roomId);
       board[kind].push(...assets);
-    });
+    }, "skip");
   }
 
   function updateBoard(roomId: string, updater: (board: RoomBoard) => void) {
     updateAlternative((alternative) => {
       const board = getOrCreateRoomBoard(alternative, roomId);
       updater(board);
-    });
+    }, "skip");
   }
 
   function removeBoardAsset(roomId: string, kind: "photos" | "renderOutputs", assetId: string) {
@@ -1314,6 +1518,7 @@ function App() {
   const activeMediaLabel = activeMediaKind === "photos" ? "Raw photo" : "Render";
   const activeMediaEmptyLabel = activeMediaKind === "photos" ? "No raw photos yet" : "No renders yet";
   const activeMediaUploadLabel = activeMediaKind === "photos" ? "Add raw photos" : "Add renders";
+  const canUndoPlanChange = planUndoStack[planUndoStack.length - 1]?.activeAlternativeId === activeAlternativeId;
   const selectedRoom = selection && "kind" in selection && selection.kind === "room" ? (selection as Room) : undefined;
   const selectedRoomHeight = selectedRoom?.ceilingHeightMeters ?? plan?.scale.ceilingHeightMeters ?? 2.55;
   const selectedRoomHeightCentimeters = selectedRoomHeight * 100;
@@ -1359,6 +1564,12 @@ function App() {
   const toggleSection = (id: string) => {
     setCollapsedSections((current) => ({ ...current, [id]: !current[id] }));
   };
+
+  useEffect(() => {
+    if (structureLocked && selection && isStructuralObject(selection)) {
+      setSelectedId(null);
+    }
+  }, [selection, structureLocked]);
 
   if (appScreen === "projects") {
     return (
@@ -1612,6 +1823,16 @@ function App() {
             </SidebarSection>
 
             <SidebarSection title="Tools" collapsed={Boolean(collapsedSections.tools)} onToggle={() => toggleSection("tools")}>
+              <button
+                type="button"
+                className={structureLocked ? "structure-lock-button active" : "structure-lock-button"}
+                onClick={toggleStructureLock}
+                aria-pressed={structureLocked}
+                title={structureLocked ? "Unlock rooms, walls, doors, and windows" : "Lock rooms, walls, doors, and windows"}
+              >
+                {structureLocked ? <Lock size={16} /> : <Unlock size={16} />}
+                <span>{structureLocked ? "Structure locked" : "Lock structure"}</span>
+              </button>
               <div className="tool-stack">
                 {toolGroups.map((group) => (
                   <div className="tool-section" key={group.title}>
@@ -1621,12 +1842,18 @@ function App() {
                         <button
                           key={item.mode}
                           className={tool === item.mode ? "tool active" : "tool"}
+                          disabled={structureLocked && isStructuralTool(item.mode)}
                           onClick={() => {
+                            if (structureLocked && isStructuralTool(item.mode)) return;
                             if (item.mode !== "polyRoom") setPolygonDraft([]);
                             if (item.mode !== "calibrate") setCalibrationPoints([]);
                             setTool(item.mode);
                           }}
-                          title={item.label}
+                          title={
+                            structureLocked && isStructuralTool(item.mode)
+                              ? "Unlock structure to use this tool"
+                              : item.label
+                          }
                         >
                           {item.icon}
                           <span>{item.label}</span>
@@ -1784,6 +2011,15 @@ function App() {
           <div className="planner-layout">
             <div className="canvas-shell" ref={canvasShellRef}>
               <div className="canvas-controls">
+                <button
+                  onClick={undoLastPlanChange}
+                  disabled={!canUndoPlanChange}
+                  aria-label="Undo last plan change"
+                  title={canUndoPlanChange ? "Undo last plan change" : "No plan changes to undo"}
+                >
+                  <Undo2 size={16} />
+                </button>
+                <i className="canvas-control-divider" aria-hidden="true" />
                 <button onClick={() => zoomCanvas(viewport.scale * 1.15)} aria-label="Zoom in">
                   <ZoomIn size={16} />
                 </button>
@@ -1794,7 +2030,7 @@ function App() {
                   <Maximize2 size={16} />
                 </button>
                 <span>{Math.round(viewport.scale * 100)}%</span>
-                <small>Scroll pan · pinch zoom · Space drag · Alt free-drag</small>
+                <small>Scroll pan · pinch zoom · Space drag · Alt free-drag · Cmd/Ctrl Z undo</small>
               </div>
               <Stage
                 width={stageSize.width}
@@ -1831,13 +2067,17 @@ function App() {
                         key={room.id}
                         x={room.x}
                         y={room.y}
-                        draggable={tool === "select"}
+                        draggable={tool === "select" && !structureLocked}
+                        listening={!structureLocked}
                         onClick={() => {
-                          if (tool === "select") setSelectedId(room.id);
+                          if (tool === "select") selectPlanObject(room.id);
+                        }}
+                        onDragStart={(event) => {
+                          if (event.target === event.currentTarget) recordPlanUndoSnapshot();
                         }}
                         onDragEnd={(event) => {
                           if (event.target !== event.currentTarget) return;
-                          moveRectangularObject(room.id, event.target.x(), event.target.y(), event.evt.altKey);
+                          moveRectangularObject(room.id, event.target.x(), event.target.y(), event.evt.altKey, "skip");
                         }}
                       >
                         <Line
@@ -1861,6 +2101,7 @@ function App() {
                         />
                         {selectedId === room.id &&
                           tool === "select" &&
+                          !structureLocked &&
                           roomPoints(room).map((point, index) => (
                             <Circle
                               key={`${room.id}-point-${index}`}
@@ -1876,14 +2117,15 @@ function App() {
                               }}
                               onDragStart={(event) => {
                                 event.cancelBubble = true;
+                                recordPlanUndoSnapshot();
                               }}
                               onDragMove={(event) => {
                                 event.cancelBubble = true;
-                                moveRoomPointFromPointer(room, index, event);
+                                moveRoomPointFromPointer(room, index, event, "skip");
                               }}
                               onDragEnd={(event) => {
                                 event.cancelBubble = true;
-                                moveRoomPointFromPointer(room, index, event);
+                                moveRoomPointFromPointer(room, index, event, "skip");
                               }}
                             />
                           ))}
@@ -1895,13 +2137,17 @@ function App() {
                         key={wall.id}
                         x={wall.x}
                         y={wall.y}
-                        draggable={tool === "select"}
+                        draggable={tool === "select" && !structureLocked}
+                        listening={!structureLocked}
                         onClick={() => {
-                          if (tool === "select") setSelectedId(wall.id);
+                          if (tool === "select") selectPlanObject(wall.id);
+                        }}
+                        onDragStart={(event) => {
+                          if (event.target === event.currentTarget) recordPlanUndoSnapshot();
                         }}
                         onDragEnd={(event) => {
                           if (event.target !== event.currentTarget) return;
-                          moveWall(wall.id, event.currentTarget.x(), event.currentTarget.y(), event.evt.altKey);
+                          moveWall(wall.id, event.currentTarget.x(), event.currentTarget.y(), event.evt.altKey, "skip");
                         }}
                         onMouseEnter={(event) => {
                           event.target.getStage()!.container().style.cursor = "pointer";
@@ -1918,6 +2164,7 @@ function App() {
                         />
                         {selectedId === wall.id &&
                           tool === "select" &&
+                          !structureLocked &&
                           ([
                             { endpoint: "start" as const, x: 0, y: 0 },
                             { endpoint: "end" as const, x: wall.x2 - wall.x, y: wall.y2 - wall.y },
@@ -1934,31 +2181,85 @@ function App() {
                               dragBoundFunc={(position) => {
                                 if (snappingDisabledRef.current) return position;
                                 const point = stageToPlanPoint(position);
-                                const constrained = snapStructuralPoint(point, plan.walls, safeGridSize(plan), wall.id);
-                                return planToStagePoint(constrained);
+                                const origin =
+                                  handle.endpoint === "start"
+                                    ? { x: wall.x2, y: wall.y2 }
+                                    : { x: wall.x, y: wall.y };
+                                const resolved = resolveWallEndpointSnap({
+                                  point,
+                                  origin,
+                                  walls: plan.walls,
+                                  gridSize: safeGridSize(plan),
+                                  viewportScale: viewport.scale,
+                                  excludeWallId: wall.id,
+                                  activeSnap: activeWallEndpointSnapRef.current,
+                                });
+                                return planToStagePoint(resolved.point);
                               }}
                               onMouseDown={(event) => {
                                 event.cancelBubble = true;
                               }}
                               onDragStart={(event) => {
                                 event.cancelBubble = true;
+                                activeWallEndpointSnapRef.current = undefined;
+                                recordPlanUndoSnapshot();
                               }}
                               onDragMove={(event) => {
                                 event.cancelBubble = true;
                                 const point = stagePlanPointer(event);
                                 if (!point) return;
-                                moveWallEndpoint(wall.id, handle.endpoint, point, event.evt.altKey);
+                                moveWallEndpoint(wall.id, handle.endpoint, point, event.evt.altKey, "skip");
                               }}
                               onDragEnd={(event) => {
                                 event.cancelBubble = true;
                                 const point = stagePlanPointer(event);
                                 if (!point) return;
-                                moveWallEndpoint(wall.id, handle.endpoint, point, event.evt.altKey);
+                                moveWallEndpoint(wall.id, handle.endpoint, point, event.evt.altKey, "skip");
+                                clearSnapState();
                               }}
                             />
                           )))}
                       </Group>
                     ))}
+                  {snapPreview.openingWallId &&
+                    (() => {
+                      const targetWall = plan.walls.find((wall) => wall.id === snapPreview.openingWallId);
+                      if (!targetWall) return null;
+                      return (
+                        <Line
+                          key="opening-snap-wall"
+                          points={[targetWall.x, targetWall.y, targetWall.x2, targetWall.y2]}
+                          stroke="#2f8f83"
+                          strokeWidth={targetWall.thickness + 8}
+                          opacity={0.28}
+                          lineCap="square"
+                          listening={false}
+                        />
+                      );
+                    })()}
+                  {snapPreview.wallGuide && (
+                    <>
+                      <Line
+                        points={[
+                          snapPreview.wallGuide.start.x,
+                          snapPreview.wallGuide.start.y,
+                          snapPreview.wallGuide.end.x,
+                          snapPreview.wallGuide.end.y,
+                        ]}
+                        stroke="#2f8f83"
+                        strokeWidth={2}
+                        dash={[8, 6]}
+                        listening={false}
+                      />
+                      <Circle
+                        x={snapPreview.wallGuide.point.x}
+                        y={snapPreview.wallGuide.point.y}
+                        radius={5}
+                        fill="#2f8f83"
+                        listening={false}
+                      />
+                    </>
+                  )}
                   {plan.walls.map((wall) => {
                     const length = Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y);
                     return (
@@ -1987,25 +2288,42 @@ function App() {
                           stroke={selectedId === opening.id ? "#242a27" : "#6d7f7c"}
                           strokeWidth={2}
                           cornerRadius={2}
-                          draggable={tool === "select"}
+                          draggable={tool === "select" && !structureLocked}
+                          listening={!structureLocked}
                           dragBoundFunc={(position) => {
                             if (snappingDisabledRef.current) return position;
                             const point = stageToPlanPoint(position);
-                            const constrained = constrainedOpeningPosition(opening, point.x, point.y, plan, false);
+                            const constrained = constrainedOpeningPosition(
+                              opening,
+                              point.x,
+                              point.y,
+                              plan,
+                              false,
+                              viewport.scale,
+                              activeOpeningSnapRef.current,
+                            );
                             return planToStagePoint({ x: constrained.x, y: constrained.y });
                           }}
                           onClick={() => {
-                            if (tool === "select") setSelectedId(opening.id);
+                            if (tool === "select") selectPlanObject(opening.id);
+                          }}
+                          onDragStart={() => {
+                            activeOpeningSnapRef.current = opening.wallId
+                              ? { kind: "opening-wall", wallId: opening.wallId }
+                              : undefined;
+                            recordPlanUndoSnapshot();
                           }}
                           onDragMove={(event) =>
-                            moveOpening(opening.id, event.target.x(), event.target.y(), event.evt.altKey)
+                            moveOpening(opening.id, event.target.x(), event.target.y(), event.evt.altKey, "skip")
                           }
-                          onDragEnd={(event) =>
-                            moveOpening(opening.id, event.target.x(), event.target.y(), event.evt.altKey)
-                          }
+                          onDragEnd={(event) => {
+                            moveOpening(opening.id, event.target.x(), event.target.y(), event.evt.altKey, "skip");
+                            clearSnapState();
+                          }}
                         />
                         {selectedId === opening.id &&
                           tool === "select" &&
+                          !structureLocked &&
                           ([
                             { endpoint: "start" as const, point: handles.start },
                             { endpoint: "end" as const, point: handles.end },
@@ -2028,6 +2346,8 @@ function App() {
                                   plan.walls,
                                   safeGridSize(plan),
                                   false,
+                                  viewport.scale,
+                                  activeOpeningSnapRef.current,
                                 );
                                 return planToStagePoint(constrained.point);
                               }}
@@ -2036,18 +2356,23 @@ function App() {
                               }}
                               onDragStart={(event) => {
                                 event.cancelBubble = true;
+                                activeOpeningSnapRef.current = opening.wallId
+                                  ? { kind: "opening-wall", wallId: opening.wallId }
+                                  : undefined;
+                                recordPlanUndoSnapshot();
                               }}
                               onDragMove={(event) => {
                                 event.cancelBubble = true;
                                 const point = stagePlanPointer(event);
                                 if (!point) return;
-                                resizeOpening(opening.id, handle.endpoint, point, event.evt.altKey);
+                                resizeOpening(opening.id, handle.endpoint, point, event.evt.altKey, "skip");
                               }}
                               onDragEnd={(event) => {
                                 event.cancelBubble = true;
                                 const point = stagePlanPointer(event);
                                 if (!point) return;
-                                resizeOpening(opening.id, handle.endpoint, point, event.evt.altKey);
+                                resizeOpening(opening.id, handle.endpoint, point, event.evt.altKey, "skip");
+                                clearSnapState();
                               }}
                             />
                           )))}
@@ -2062,11 +2387,20 @@ function App() {
                       rotation={fixture.rotation}
                       draggable={tool === "select"}
                       onClick={() => {
-                        if (tool === "select") setSelectedId(fixture.id);
+                        if (tool === "select") selectPlanObject(fixture.id);
+                      }}
+                      onDragStart={(event) => {
+                        if (event.target === event.currentTarget) recordPlanUndoSnapshot();
                       }}
                       onDragEnd={(event) => {
                         if (event.target !== event.currentTarget) return;
-                        moveRectangularObject(fixture.id, event.currentTarget.x(), event.currentTarget.y(), event.evt.altKey);
+                        moveRectangularObject(
+                          fixture.id,
+                          event.currentTarget.x(),
+                          event.currentTarget.y(),
+                          event.evt.altKey,
+                          "skip",
+                        );
                       }}
                     >
                       <PlanFixtureGlyph fixture={fixture} selected={selectedId === fixture.id} />
@@ -2340,7 +2674,7 @@ function App() {
                           key={room.id}
                           onClick={() => {
                             setActiveMediaRoomId(room.id);
-                            setSelectedId(room.id);
+                            selectPlanObject(room.id);
                           }}
                         >
                           <span className="room-rail-color" style={{ background: room.color }} />
@@ -2423,7 +2757,7 @@ function App() {
         {view === "three" && plan && (
           <div className="three-shell">
             <Suspense fallback={<div className="walkthrough-help">Loading 3D preview...</div>}>
-              <ThreePreview plan={plan} selectedId={selectedId} onSelect={setSelectedId} />
+              <ThreePreview plan={plan} selectedId={selectedId} onSelect={selectPlanObject} />
             </Suspense>
           </div>
         )}
