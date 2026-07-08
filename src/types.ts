@@ -69,6 +69,17 @@ export interface Fixture extends PlanObject {
   kind: FixtureKind;
 }
 
+export type RoomStyleCategory = "palette" | "material" | "fixture" | "reference";
+
+export interface RoomStyleItem {
+  id: string;
+  category: RoomStyleCategory;
+  name: string;
+  detail: string;
+  color?: string;
+  createdAt: string;
+}
+
 export interface Plan {
   scale: {
     pixelsPerMeter: number;
@@ -91,8 +102,13 @@ export interface RoomBoard {
   roomId: string;
   photos: Asset[];
   renderOutputs: Asset[];
+  referenceImages: Asset[];
+  styleItems: RoomStyleItem[];
   prompts: string[];
+  stylePrompt: string;
   notes: string;
+  beforeAssetId?: string;
+  afterAssetId?: string;
 }
 
 export interface Alternative {

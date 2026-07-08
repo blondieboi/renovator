@@ -75,6 +75,7 @@ import {
 const ThreePreview = lazy(() => import("./ThreePreview"));
 
 type AppScreen = "projects" | "editor";
+type RoomBoardTab = "photos" | "renderOutputs" | "styleBoard";
 type PlanUndoMode = "record" | "skip";
 type PlanUndoSnapshot = PlanUndoSnapshotBase & {
   projects: PropertyProject[];
@@ -120,7 +121,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [view, setView] = useState<"plan" | "media" | "three">("plan");
   const [activeMediaRoomId, setActiveMediaRoomId] = useState("");
-  const [activeMediaKind, setActiveMediaKind] = useState<"photos" | "renderOutputs">("photos");
+  const [activeMediaKind, setActiveMediaKind] = useState<RoomBoardTab>("photos");
   const [previewAsset, setPreviewAsset] = useState<{ asset: Asset; label: string } | null>(null);
   const [status, setStatus] = useState("Loading local workshop...");
   const [polygonDraft, setPolygonDraft] = useState<PlanPoint[]>([]);
@@ -1148,7 +1149,7 @@ function App() {
     });
   }
 
-  async function addBoardAssets(roomId: string, kind: "photos" | "renderOutputs", files: FileList | null) {
+  async function addBoardAssets(roomId: string, kind: "photos" | "renderOutputs" | "referenceImages", files: FileList | null) {
     if (!files) return;
     const assets = await Promise.all([...files].map(readFileAsDataUrl));
     updateAlternative((alternative) => {
@@ -1164,9 +1165,11 @@ function App() {
     }, "skip");
   }
 
-  function removeBoardAsset(roomId: string, kind: "photos" | "renderOutputs", assetId: string) {
+  function removeBoardAsset(roomId: string, kind: "photos" | "renderOutputs" | "referenceImages", assetId: string) {
     updateBoard(roomId, (board) => {
       board[kind] = board[kind].filter((asset) => asset.id !== assetId);
+      if (kind === "photos" && board.beforeAssetId === assetId) board.beforeAssetId = undefined;
+      if (kind === "renderOutputs" && board.afterAssetId === assetId) board.afterAssetId = undefined;
     });
   }
 
@@ -1375,6 +1378,7 @@ function App() {
             onAddAssets={addBoardAssets}
             onOpenAsset={(asset, label) => setPreviewAsset({ asset, label })}
             onRemoveAsset={removeBoardAsset}
+            onUpdateBoard={updateBoard}
             onUpdateNotes={(roomId, notes) => updateBoard(roomId, (item) => (item.notes = notes))}
           />
         )}

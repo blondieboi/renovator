@@ -9,6 +9,8 @@ import type {
   PropertyType,
   Room,
   RoomBoard,
+  RoomStyleCategory,
+  RoomStyleItem,
 } from "./types";
 
 export const LOCAL_OWNER_ID = "local-user";
@@ -60,7 +62,16 @@ export function createAlternative(name = "Original sketch"): Alternative {
 }
 
 export function createRoomBoard(roomId: string): RoomBoard {
-  return { roomId, photos: [], renderOutputs: [], prompts: [], notes: "" };
+  return {
+    roomId,
+    photos: [],
+    renderOutputs: [],
+    referenceImages: [],
+    styleItems: [],
+    prompts: [],
+    stylePrompt: "",
+    notes: "",
+  };
 }
 
 export function createPropertyProject(
@@ -113,6 +124,26 @@ function normalizeAsset(value: unknown): Asset | undefined {
   };
 }
 
+const roomStyleCategories: RoomStyleCategory[] = ["palette", "material", "fixture", "reference"];
+
+function normalizeRoomStyleItem(value: unknown): RoomStyleItem | undefined {
+  if (!isRecord(value)) return undefined;
+  const name = stringOr(value.name, "");
+  if (!name) return undefined;
+  const category = roomStyleCategories.includes(value.category as RoomStyleCategory)
+    ? (value.category as RoomStyleCategory)
+    : "material";
+  const color = typeof value.color === "string" && value.color.trim() ? value.color : undefined;
+  return {
+    id: stringOr(value.id, uid("style")),
+    category,
+    name,
+    detail: stringOr(value.detail, ""),
+    color,
+    createdAt: stringOr(value.createdAt, nowIso()),
+  };
+}
+
 function normalizeRoomBoard(value: unknown): RoomBoard | undefined {
   if (!isRecord(value)) return undefined;
   const roomId = stringOr(value.roomId, "");
@@ -123,8 +154,17 @@ function normalizeRoomBoard(value: unknown): RoomBoard | undefined {
     renderOutputs: Array.isArray(value.renderOutputs)
       ? value.renderOutputs.map(normalizeAsset).filter((asset): asset is Asset => Boolean(asset))
       : [],
+    referenceImages: Array.isArray(value.referenceImages)
+      ? value.referenceImages.map(normalizeAsset).filter((asset): asset is Asset => Boolean(asset))
+      : [],
+    styleItems: Array.isArray(value.styleItems)
+      ? value.styleItems.map(normalizeRoomStyleItem).filter((item): item is RoomStyleItem => Boolean(item))
+      : [],
     prompts: Array.isArray(value.prompts) ? value.prompts.filter((prompt): prompt is string => typeof prompt === "string") : [],
+    stylePrompt: stringOr(value.stylePrompt, ""),
     notes: stringOr(value.notes, ""),
+    beforeAssetId: typeof value.beforeAssetId === "string" ? value.beforeAssetId : undefined,
+    afterAssetId: typeof value.afterAssetId === "string" ? value.afterAssetId : undefined,
   };
 }
 
@@ -211,6 +251,16 @@ function cloneAsset(asset: Asset): Asset {
   return { ...asset, id: uid("asset") };
 }
 
+function cloneAssetsWithIdMap(assets: Asset[]) {
+  const ids = new Map<string, string>();
+  const cloned = assets.map((asset) => {
+    const copy = cloneAsset(asset);
+    ids.set(asset.id, copy.id);
+    return copy;
+  });
+  return { cloned, ids };
+}
+
 export function cloneProjectForLocal(source: PropertyProject, name = `${source.name} copy`): PropertyProject {
   const normalized = normalizeProject(source);
   const now = nowIso();
@@ -255,13 +305,22 @@ export function cloneProjectForLocal(source: PropertyProject, name = `${source.n
             rooms,
             fixtures: alternative.plan.fixtures.map((fixture) => ({ ...fixture, id: uid("fixture") })),
           },
-          roomBoards: alternative.roomBoards.map((board) => ({
-            ...board,
-            roomId: roomIds.get(board.roomId) ?? board.roomId,
-            photos: board.photos.map(cloneAsset),
-            renderOutputs: board.renderOutputs.map(cloneAsset),
-            prompts: [...board.prompts],
-          })),
+          roomBoards: alternative.roomBoards.map((board) => {
+            const photos = cloneAssetsWithIdMap(board.photos);
+            const renderOutputs = cloneAssetsWithIdMap(board.renderOutputs);
+            const referenceImages = cloneAssetsWithIdMap(board.referenceImages);
+            return {
+              ...board,
+              roomId: roomIds.get(board.roomId) ?? board.roomId,
+              photos: photos.cloned,
+              renderOutputs: renderOutputs.cloned,
+              referenceImages: referenceImages.cloned,
+              styleItems: board.styleItems.map((item) => ({ ...item, id: uid("style") })),
+              prompts: [...board.prompts],
+              beforeAssetId: board.beforeAssetId ? photos.ids.get(board.beforeAssetId) : undefined,
+              afterAssetId: board.afterAssetId ? renderOutputs.ids.get(board.afterAssetId) : undefined,
+            };
+          }),
         };
       }),
     })),
