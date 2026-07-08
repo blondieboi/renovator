@@ -51,6 +51,18 @@ Preview the production build:
 npm run preview
 ```
 
+## Deployment
+
+The app is configured for GitHub Pages at:
+
+```text
+https://blondieboi.github.io/renovator/
+```
+
+Pushing to `main` runs the GitHub Pages workflow and publishes the production build from `dist`.
+
+In the repository settings on GitHub, set Pages to use **GitHub Actions** as the build and deployment source.
+
 ## Project Structure
 
 ```text
