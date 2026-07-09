@@ -473,8 +473,8 @@ export function constrainOpeningHandle(
   if (resizeWall) {
     const wallEndpoint = nearestWallEndpoint(point, [resizeWall], threshold);
     return {
-      point: wallEndpoint?.point ?? projectPointToWallAxis(point, resizeWall),
-      fixed: projectPointToWallAxis(fixed, resizeWall),
+      point: wallEndpoint?.point ?? projectPointToWall(point, resizeWall),
+      fixed: projectPointToWall(fixed, resizeWall),
       rotation: wallAngle(resizeWall),
       wallId: resizeWall.id,
       activeSnap: { kind: "opening-wall" as const, wallId: resizeWall.id },

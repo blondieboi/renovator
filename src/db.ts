@@ -30,7 +30,15 @@ export async function loadProjects() {
 export async function saveProjects(projects: PropertyProject[]) {
   const normalized = projects.map(normalizeProject);
   await db.transaction("rw", db.projects, async () => {
-    await db.projects.clear();
-    await db.projects.bulkPut(normalized);
+    const existing = await db.projects.toArray();
+    const existingById = new Map(existing.map((project) => [project.id, project]));
+    const changed = normalized.filter((project) => {
+      const stored = existingById.get(project.id);
+      return !stored || stored.updatedAt !== project.updatedAt || stored.schemaVersion !== project.schemaVersion;
+    });
+    const nextIds = new Set(normalized.map((project) => project.id));
+    const removedIds = existing.filter((project) => !nextIds.has(project.id)).map((project) => project.id);
+    if (changed.length > 0) await db.projects.bulkPut(changed);
+    if (removedIds.length > 0) await db.projects.bulkDelete(removedIds);
   });
 }

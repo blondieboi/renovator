@@ -2,9 +2,12 @@ import {
   moveRectangularObjectInPlan,
   moveRoomPointInPlan,
   moveWallInPlan,
+  removePlanObjectInAlternative,
+  rotateWallInPlan,
+  resizeWallLengthInPlan,
   resizeWallEndpointInPlan,
 } from "./planActions";
-import type { Fixture, Plan, Room, Wall } from "./types";
+import type { Alternative, Fixture, Opening, Plan, Room, Wall } from "./types";
 
 function wall(overrides: Partial<Wall>): Wall {
   return {
@@ -54,6 +57,21 @@ function fixture(overrides: Partial<Fixture>): Fixture {
     width: 50,
     height: 70,
     rotation: 0,
+    ...overrides,
+  };
+}
+
+function opening(overrides: Partial<Opening>): Opening {
+  return {
+    id: "door",
+    kind: "door",
+    name: "Door",
+    x: 20,
+    y: -6,
+    width: 40,
+    height: 12,
+    rotation: 0,
+    wallId: "wall",
     ...overrides,
   };
 }
@@ -134,6 +152,69 @@ export const planActionTestCases = [
       const sourcePlan = plan({ walls: [sourceWall] });
       const resized = resizeWallEndpointInPlan(sourcePlan, "wall_a", "end", { x: 0, y: 100 });
       return resized && sourceWall.width === 100 && nearlyEqual(sourceWall.rotation, 90);
+    },
+  },
+  {
+    name: "moving a wall keeps its attached openings aligned",
+    run() {
+      const sourceWall = wall({ id: "wall", x: 0, y: 0, x2: 100, y2: 0 });
+      const door = opening({ wallId: sourceWall.id });
+      const sourcePlan = plan({ walls: [sourceWall], openings: [door] });
+      const moved = moveWallInPlan(sourcePlan, sourceWall.id, 25, 25, false);
+      return moved && door.x === 45 && door.y === 19 && door.wallId === sourceWall.id;
+    },
+  },
+  {
+    name: "rotating a wall keeps its stored length and attached opening position in sync",
+    run() {
+      const sourceWall = wall({ id: "wall", x: 0, y: 0, x2: 100, y2: 0, width: 5 });
+      const door = opening({ wallId: sourceWall.id });
+      const sourcePlan = plan({ walls: [sourceWall], openings: [door] });
+      const rotated = rotateWallInPlan(sourcePlan, sourceWall.id, 90);
+      return (
+        rotated &&
+        nearlyEqual(sourceWall.width, 100) &&
+        nearlyEqual(sourceWall.x2, 0) &&
+        nearlyEqual(sourceWall.y2, 100) &&
+        nearlyEqual(door.x, 6) &&
+        nearlyEqual(door.y, 20)
+      );
+    },
+  },
+  {
+    name: "resizing a wall repositions openings within the new wall length",
+    run() {
+      const sourceWall = wall({ id: "wall", x: 0, y: 0, x2: 100, y2: 0 });
+      const door = opening({ wallId: sourceWall.id, x: 60, width: 40 });
+      const sourcePlan = plan({ walls: [sourceWall], openings: [door] });
+      const resized = resizeWallEndpointInPlan(sourcePlan, sourceWall.id, "end", { x: 50, y: 0 });
+      return resized && nearlyEqual(door.width, 40) && nearlyEqual(door.x, 10) && nearlyEqual(door.y, -6);
+    },
+  },
+  {
+    name: "changing a wall length keeps attached openings within its bounds",
+    run() {
+      const sourceWall = wall({ id: "wall", x: 0, y: 0, x2: 100, y2: 0 });
+      const door = opening({ wallId: sourceWall.id, x: 60, width: 40 });
+      const sourcePlan = plan({ walls: [sourceWall], openings: [door] });
+      const resized = resizeWallLengthInPlan(sourcePlan, sourceWall.id, 50);
+      return resized && nearlyEqual(sourceWall.width, 50) && nearlyEqual(door.x, 10) && nearlyEqual(door.y, -6);
+    },
+  },
+  {
+    name: "deleting a wall detaches its openings instead of leaving stale references",
+    run() {
+      const sourceWall = wall({ id: "wall" });
+      const door = opening({ wallId: sourceWall.id });
+      const alternative: Alternative = {
+        id: "alternative",
+        name: "Current layout",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        plan: plan({ walls: [sourceWall], openings: [door] }),
+        roomBoards: [],
+      };
+      const removed = removePlanObjectInAlternative(alternative, sourceWall.id);
+      return removed && alternative.plan.walls.length === 0 && alternative.plan.openings[0]?.wallId === undefined;
     },
   },
 ];

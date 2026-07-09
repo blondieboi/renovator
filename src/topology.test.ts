@@ -95,6 +95,44 @@ export const topologyTestCases = [
     },
   },
   {
+    name: "does not treat near-miss endpoints as a movable shared joint",
+    run() {
+      const topology = derivePlanTopology(
+        testPlan({
+          walls: [
+            {
+              id: "wall_a",
+              kind: "wall",
+              name: "Wall",
+              x: 0,
+              y: 0,
+              x2: 100,
+              y2: 0,
+              width: 100,
+              height: 12,
+              thickness: 12,
+              rotation: 0,
+            },
+            {
+              id: "wall_b",
+              kind: "wall",
+              name: "Wall",
+              x: 108,
+              y: 0,
+              x2: 108,
+              y2: 100,
+              width: 100,
+              height: 12,
+              thickness: 12,
+              rotation: 90,
+            },
+          ],
+        }),
+      );
+      return !topology.joints.some((joint) => joint.endpoints.some((item) => item.wallId === "wall_a" && item.endpoint === "end") && joint.endpoints.some((item) => item.wallId === "wall_b" && item.endpoint === "start"));
+    },
+  },
+  {
     name: "rejects self-intersecting polygons",
     run() {
       return !isSimplePolygon([

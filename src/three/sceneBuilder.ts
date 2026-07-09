@@ -16,29 +16,22 @@ export interface BuiltPlanScene {
   root: THREE.Group;
   topology: PlanTopology;
   bounds: THREE.Box3;
-  selectedBounds?: THREE.Box3;
   transform: PlanToWorldTransform;
 }
+
+const selectionHelperName = "plan-selection-helper";
 
 function applyObjectMetadata(object: THREE.Object3D, id: string, kind: string) {
   object.userData.planObjectId = id;
   object.userData.planObjectKind = kind;
 }
 
-function selectedMaterial(material: THREE.MeshStandardMaterial, selected: boolean) {
-  if (!selected) return material;
-  const clone = material.clone();
-  clone.emissive = new THREE.Color("#d8b45a");
-  clone.emissiveIntensity = 0.16;
-  return clone;
-}
-
-function addOutline(root: THREE.Group, mesh: THREE.Mesh, selected = false) {
-  const geometry = new THREE.EdgesGeometry(mesh.geometry, selected ? 20 : 35);
+function addOutline(root: THREE.Group, mesh: THREE.Mesh) {
+  const geometry = new THREE.EdgesGeometry(mesh.geometry, 35);
   const material = new THREE.LineBasicMaterial({
-    color: selected ? "#242a27" : "#d8d2c5",
+    color: "#d8d2c5",
     transparent: true,
-    opacity: selected ? 0.95 : 0.38,
+    opacity: 0.38,
   });
   const line = new THREE.LineSegments(geometry, material);
   line.position.copy(mesh.position);
@@ -48,7 +41,7 @@ function addOutline(root: THREE.Group, mesh: THREE.Mesh, selected = false) {
   root.add(line);
 }
 
-function buildRoomFloors(root: THREE.Group, topology: PlanTopology, transform: PlanToWorldTransform, selectedId?: string) {
+function buildRoomFloors(root: THREE.Group, topology: PlanTopology, transform: PlanToWorldTransform) {
   topology.rooms.forEach(({ room, points, valid }) => {
     if (points.length < 3) return;
     const shape = new THREE.Shape(
@@ -63,14 +56,14 @@ function buildRoomFloors(root: THREE.Group, topology: PlanTopology, transform: P
       roughness: 0.82,
       metalness: 0,
     });
-    const mesh = new THREE.Mesh(geometry, selectedMaterial(baseMaterial, selectedId === room.id));
+    const mesh = new THREE.Mesh(geometry, baseMaterial);
     mesh.name = room.id;
     applyObjectMetadata(mesh, room.id, "room");
     mesh.rotation.x = Math.PI / 2;
     mesh.position.y = 0;
     mesh.receiveShadow = true;
     root.add(mesh);
-    addOutline(root, mesh, selectedId === room.id);
+    addOutline(root, mesh);
   });
 }
 
@@ -135,7 +128,7 @@ function addFixtureCylinder(
   return mesh;
 }
 
-function buildFixture(root: THREE.Group, fixture: Fixture, transform: PlanToWorldTransform, material: THREE.Material, selectedId?: string) {
+function buildFixture(root: THREE.Group, fixture: Fixture, transform: PlanToWorldTransform, material: THREE.Material) {
   const center = rotatedRectCenter(fixture);
   const pos = transform.point(center);
   const group = new THREE.Group();
@@ -146,7 +139,7 @@ function buildFixture(root: THREE.Group, fixture: Fixture, transform: PlanToWorl
   const low = transform.meters(0.18);
   const mid = transform.meters(0.45);
   const counter = transform.meters(0.9);
-  const fixtureMaterial = selectedMaterial(material as THREE.MeshStandardMaterial, selectedId === fixture.id);
+  const fixtureMaterial = material;
 
   switch (fixture.kind) {
     case "bed":
@@ -207,7 +200,7 @@ function buildFixture(root: THREE.Group, fixture: Fixture, transform: PlanToWorl
   });
   root.add(group);
   group.children.forEach((child) => {
-    if (child instanceof THREE.Mesh) addOutline(group, child, selectedId === fixture.id);
+    if (child instanceof THREE.Mesh) addOutline(group, child);
   });
 }
 
@@ -240,7 +233,7 @@ function buildGroundPlane(root: THREE.Group, topology: PlanTopology, transform: 
   root.add(grid);
 }
 
-export function buildPlanScene(plan: Plan, selectedId?: string): BuiltPlanScene {
+export function buildPlanScene(plan: Plan): BuiltPlanScene {
   const root = new THREE.Group();
   root.name = "plan-scene";
 
@@ -261,33 +254,22 @@ export function buildPlanScene(plan: Plan, selectedId?: string): BuiltPlanScene 
   };
 
   buildGroundPlane(root, topology, transform);
-  buildRoomFloors(root, topology, transform, selectedId);
+  buildRoomFloors(root, topology, transform);
 
   topology.edges.forEach((edge) => {
     const group = buildWallElements(plan, edge, topology, transform, wallHeight, materials);
-    if (selectedId === edge.wall.id) {
-      group.traverse((object) => {
-        if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
-          object.material = selectedMaterial(object.material, true);
-        }
-      });
-    }
     root.add(group);
   });
 
   topology.looseOpenings.forEach((opening) => buildLooseOpeningPreview(root, opening, transform, wallHeight));
 
-  plan.fixtures.forEach((fixture) => buildFixture(root, fixture, transform, materials.fixture, selectedId));
+  plan.fixtures.forEach((fixture) => buildFixture(root, fixture, transform, materials.fixture));
 
   const bounds = new THREE.Box3();
-  const selectedBounds = selectedId ? new THREE.Box3() : undefined;
   root.traverse((object) => {
     if (object.userData.ignoreForFit) return;
     if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
       bounds.expandByObject(object);
-      if (selectedBounds && object.userData.planObjectId === selectedId) {
-        selectedBounds.expandByObject(object);
-      }
     }
   });
   if (bounds.isEmpty()) bounds.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(180, 80, 180));
@@ -296,7 +278,35 @@ export function buildPlanScene(plan: Plan, selectedId?: string): BuiltPlanScene 
     root,
     topology,
     bounds,
-    selectedBounds: selectedBounds && !selectedBounds.isEmpty() ? selectedBounds : undefined,
     transform,
   };
+}
+
+function disposeSelectionHelper(helper: THREE.Object3D) {
+  if (!(helper instanceof THREE.LineSegments)) return;
+  helper.geometry.dispose();
+  const materials = Array.isArray(helper.material) ? helper.material : [helper.material];
+  materials.forEach((material) => material.dispose());
+}
+
+export function updatePlanSceneSelection(root: THREE.Group, selectedId?: string | null) {
+  const existing = root.getObjectByName(selectionHelperName);
+  if (existing) {
+    existing.parent?.remove(existing);
+    disposeSelectionHelper(existing);
+  }
+  if (!selectedId) return undefined;
+
+  const bounds = new THREE.Box3();
+  root.traverse((object) => {
+    if (object.userData.planObjectId !== selectedId) return;
+    if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) bounds.expandByObject(object);
+  });
+  if (bounds.isEmpty()) return undefined;
+
+  const helper = new THREE.Box3Helper(bounds, new THREE.Color("#d8b45a"));
+  helper.name = selectionHelperName;
+  helper.userData.ignoreForFit = true;
+  root.add(helper);
+  return bounds;
 }

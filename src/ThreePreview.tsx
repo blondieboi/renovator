@@ -2,7 +2,7 @@ import { Eye, Footprints, Maximize2, Rotate3D } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Plan } from "./types";
-import { buildPlanScene } from "./three/sceneBuilder";
+import { buildPlanScene, updatePlanSceneSelection } from "./three/sceneBuilder";
 
 type CameraMode = "orbit" | "walk";
 type ViewPreset = "isometric" | "top";
@@ -18,9 +18,18 @@ function ThreePreview({
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const fitViewRef = useRef<((preset?: ViewPreset) => void) | null>(null);
+  const selectionUpdateRef = useRef<((id?: string | null) => void) | null>(null);
+  const cameraModeChangeRef = useRef<((mode: CameraMode) => void) | null>(null);
+  const onSelectRef = useRef(onSelect);
+  const cameraModeRef = useRef<CameraMode>("orbit");
+  const viewPresetRef = useRef<ViewPreset>("isometric");
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [viewPreset, setViewPreset] = useState<ViewPreset>("isometric");
   const hasSelection = Boolean(selectedId);
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -59,8 +68,9 @@ function ThreePreview({
     sun.shadow.bias = -0.00035;
     scene.add(sun);
 
-    const builtScene = buildPlanScene(plan, selectedId ?? undefined);
+    const builtScene = buildPlanScene(plan);
     scene.add(builtScene.root);
+    let selectedBounds = updatePlanSceneSelection(builtScene.root, selectedId);
 
     const orbitState = {
       target: new THREE.Vector3(),
@@ -95,7 +105,7 @@ function ThreePreview({
       direction.normalize();
       yaw = Math.atan2(-direction.x, -direction.z);
     };
-    const activeFitBounds = () => builtScene.selectedBounds ?? builtScene.bounds;
+    const activeFitBounds = () => selectedBounds ?? builtScene.bounds;
     const fitWalkCamera = () => {
       const box = activeFitBounds();
       const center = box.getCenter(new THREE.Vector3());
@@ -108,7 +118,7 @@ function ThreePreview({
       camera.rotation.set(lookPitch, yaw, 0);
     };
 
-    const fitCamera = (preset: ViewPreset = viewPreset) => {
+    const fitCamera = (preset: ViewPreset = viewPresetRef.current) => {
       const box = activeFitBounds();
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
@@ -127,8 +137,15 @@ function ThreePreview({
       setYawToward(center);
     };
     fitViewRef.current = fitCamera;
-    fitCamera(viewPreset);
-    if (cameraMode === "walk") fitWalkCamera();
+    selectionUpdateRef.current = (id) => {
+      selectedBounds = updatePlanSceneSelection(builtScene.root, id);
+    };
+    cameraModeChangeRef.current = (mode) => {
+      cameraModeRef.current = mode;
+      if (mode === "walk") fitWalkCamera();
+    };
+    fitCamera(viewPresetRef.current);
+    if (cameraModeRef.current === "walk") fitWalkCamera();
 
     const keys = new Set<string>();
     const keyDown = (event: KeyboardEvent) => keys.add(event.key.toLowerCase());
@@ -143,7 +160,7 @@ function ThreePreview({
       const moveSpeed = 95 * delta;
       const turnSpeed = 1.45 * delta;
 
-      if (cameraMode === "walk") {
+      if (cameraModeRef.current === "walk") {
         camera.up.set(0, 1, 0);
         if (keys.has("q")) yaw += turnSpeed;
         if (keys.has("e")) yaw -= turnSpeed;
@@ -174,14 +191,14 @@ function ThreePreview({
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
-      fitCamera(viewPreset);
+      fitCamera(viewPresetRef.current);
     };
     window.addEventListener("resize", handleResize);
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const handlePointerDown = (event: PointerEvent) => {
-      if (cameraMode === "orbit") {
+      if (cameraModeRef.current === "orbit") {
         orbitState.dragging = true;
         orbitState.moved = false;
         orbitState.lastX = event.clientX;
@@ -190,7 +207,7 @@ function ThreePreview({
       }
     };
     const handlePointerMove = (event: PointerEvent) => {
-      if (!orbitState.dragging || cameraMode !== "orbit") return;
+      if (!orbitState.dragging || cameraModeRef.current !== "orbit") return;
       const dx = event.clientX - orbitState.lastX;
       const dy = event.clientY - orbitState.lastY;
       orbitState.moved = orbitState.moved || Math.abs(dx) + Math.abs(dy) > 3;
@@ -201,14 +218,14 @@ function ThreePreview({
       updateOrbitCamera();
     };
     const handlePointerUp = (event: PointerEvent) => {
-      if (cameraMode === "orbit") {
+      if (cameraModeRef.current === "orbit") {
         orbitState.dragging = false;
         if (renderer.domElement.hasPointerCapture(event.pointerId)) {
           renderer.domElement.releasePointerCapture(event.pointerId);
         }
       }
       if (orbitState.moved) return;
-      if (!onSelect) return;
+      if (!onSelectRef.current) return;
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -216,10 +233,10 @@ function ThreePreview({
       const hit = raycaster
         .intersectObjects(builtScene.root.children, true)
         .find((item) => item.object.userData.planObjectId);
-      onSelect(hit?.object.userData.planObjectId ?? null);
+      onSelectRef.current(hit?.object.userData.planObjectId ?? null);
     };
     const handleWheel = (event: WheelEvent) => {
-      if (cameraMode !== "orbit") return;
+      if (cameraModeRef.current !== "orbit") return;
       event.preventDefault();
       orbitState.radius = Math.max(60, Math.min(1400, orbitState.radius * (1 + event.deltaY * 0.001)));
       updateOrbitCamera();
@@ -231,6 +248,8 @@ function ThreePreview({
 
     return () => {
       fitViewRef.current = null;
+      selectionUpdateRef.current = null;
+      cameraModeChangeRef.current = null;
       cancelAnimationFrame(animationFrame);
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
@@ -256,16 +275,25 @@ function ThreePreview({
         mount.removeChild(renderer.domElement);
       }
     };
-  }, [cameraMode, onSelect, plan, selectedId, viewPreset]);
+  }, [plan]);
+
+  useEffect(() => {
+    selectionUpdateRef.current?.(selectedId);
+  }, [selectedId]);
 
   function applyPreset(preset: ViewPreset) {
+    viewPresetRef.current = preset;
+    cameraModeRef.current = "orbit";
     setCameraMode("orbit");
     setViewPreset(preset);
+    cameraModeChangeRef.current?.("orbit");
     fitViewRef.current?.(preset);
   }
 
   function fitOrbitView() {
+    cameraModeRef.current = "orbit";
     setCameraMode("orbit");
+    cameraModeChangeRef.current?.("orbit");
     fitViewRef.current?.(viewPreset);
   }
 
@@ -289,7 +317,14 @@ function ThreePreview({
         <button
           type="button"
           className={cameraMode === "walk" ? "active" : ""}
-          onClick={() => setCameraMode((current) => (current === "walk" ? "orbit" : "walk"))}
+          onClick={() =>
+            setCameraMode((current) => {
+              const next = current === "walk" ? "orbit" : "walk";
+              cameraModeRef.current = next;
+              cameraModeChangeRef.current?.(next);
+              return next;
+            })
+          }
           aria-label="Walk mode"
           title="Walk mode"
         >

@@ -1,8 +1,9 @@
 import { planActionTestCases } from "./planActions.test";
 import { snapTestCases } from "./snap.test";
 import { topologyTestCases } from "./topology.test";
+import { utilsTestCases } from "./utils.test";
 
-const testCases = [...snapTestCases, ...topologyTestCases, ...planActionTestCases];
+const testCases = [...snapTestCases, ...topologyTestCases, ...planActionTestCases, ...utilsTestCases];
 let failures = 0;
 
 for (const testCase of testCases) {

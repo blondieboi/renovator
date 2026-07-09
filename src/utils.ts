@@ -1,8 +1,10 @@
 import type {
   Alternative,
   Asset,
+  Fixture,
   FixtureKind,
   Floor,
+  Opening,
   Plan,
   PlanPoint,
   PropertyProject,
@@ -11,6 +13,7 @@ import type {
   RoomBoard,
   RoomStyleCategory,
   RoomStyleItem,
+  Wall,
 } from "./types";
 
 export const LOCAL_OWNER_ID = "local-user";
@@ -168,45 +171,255 @@ function normalizeRoomBoard(value: unknown): RoomBoard | undefined {
   };
 }
 
+function finiteNumber(value: unknown, fallback: number, minimum = -Infinity) {
+  return typeof value === "number" && Number.isFinite(value) && value >= minimum ? value : fallback;
+}
+
+function optionalFiniteNumber(value: unknown, minimum = -Infinity) {
+  return typeof value === "number" && Number.isFinite(value) && value >= minimum ? value : undefined;
+}
+
+function normalizeMetadata(value: unknown): Record<string, string | number | boolean> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    ([, entry]) =>
+      typeof entry === "string" ||
+      typeof entry === "boolean" ||
+      (typeof entry === "number" && Number.isFinite(entry)),
+  );
+  return entries.length ? (Object.fromEntries(entries) as Record<string, string | number | boolean>) : undefined;
+}
+
+function normalizePlanObject(value: Record<string, unknown>, id: string) {
+  return {
+    id,
+    name: stringOr(value.name, "Plan object"),
+    x: finiteNumber(value.x, 0),
+    y: finiteNumber(value.y, 0),
+    width: finiteNumber(value.width, 1, 1),
+    height: finiteNumber(value.height, 1, 1),
+    rotation: finiteNumber(value.rotation, 0),
+    metadata: normalizeMetadata(value.metadata),
+  };
+}
+
+function uniqueId(value: unknown, prefix: string, usedIds: Set<string>, aliases?: Map<string, string>) {
+  const requested = typeof value === "string" && value.trim() ? value : undefined;
+  if (requested && !usedIds.has(requested)) {
+    usedIds.add(requested);
+    aliases?.set(requested, requested);
+    return requested;
+  }
+  const id = uid(prefix);
+  usedIds.add(id);
+  if (requested && !aliases?.has(requested)) aliases?.set(requested, id);
+  return id;
+}
+
+function normalizePoint(value: unknown): PlanPoint | undefined {
+  if (!isRecord(value)) return undefined;
+  const x = optionalFiniteNumber(value.x);
+  const y = optionalFiniteNumber(value.y);
+  return x === undefined || y === undefined ? undefined : { x, y };
+}
+
+function orientation(a: PlanPoint, b: PlanPoint, c: PlanPoint) {
+  const value = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
+  if (Math.abs(value) < 0.0001) return 0;
+  return value > 0 ? 1 : 2;
+}
+
+function pointOnSegment(a: PlanPoint, b: PlanPoint, c: PlanPoint) {
+  return (
+    b.x <= Math.max(a.x, c.x) + 0.0001 &&
+    b.x >= Math.min(a.x, c.x) - 0.0001 &&
+    b.y <= Math.max(a.y, c.y) + 0.0001 &&
+    b.y >= Math.min(a.y, c.y) - 0.0001
+  );
+}
+
+function segmentsIntersect(a: PlanPoint, b: PlanPoint, c: PlanPoint, d: PlanPoint) {
+  const o1 = orientation(a, b, c);
+  const o2 = orientation(a, b, d);
+  const o3 = orientation(c, d, a);
+  const o4 = orientation(c, d, b);
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && pointOnSegment(a, c, b)) return true;
+  if (o2 === 0 && pointOnSegment(a, d, b)) return true;
+  if (o3 === 0 && pointOnSegment(c, a, d)) return true;
+  if (o4 === 0 && pointOnSegment(c, b, d)) return true;
+  return false;
+}
+
+function isSimpleRoomPolygon(points: PlanPoint[]) {
+  if (points.length < 3 || polygonArea(points) < 1) return false;
+  for (let index = 0; index < points.length; index += 1) {
+    const nextIndex = (index + 1) % points.length;
+    if (Math.hypot(points[index].x - points[nextIndex].x, points[index].y - points[nextIndex].y) < 1) return false;
+    for (let compare = index + 1; compare < points.length; compare += 1) {
+      const compareNext = (compare + 1) % points.length;
+      if (index === compare || nextIndex === compare || index === compareNext) continue;
+      if (segmentsIntersect(points[index], points[nextIndex], points[compare], points[compareNext])) return false;
+    }
+  }
+  return true;
+}
+
+function normalizeRoomShape(points: PlanPoint[] | undefined, x: number, y: number, width: number, height: number) {
+  if (!points || !isSimpleRoomPolygon(points)) {
+    return { x, y, width, height, points: rectangleRoomPoints({ width, height }) };
+  }
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  if (maxX - minX < 1 || maxY - minY < 1) {
+    return { x, y, width, height, points: rectangleRoomPoints({ width, height }) };
+  }
+  return {
+    x: x + minX,
+    y: y + minY,
+    width: maxX - minX,
+    height: maxY - minY,
+    points: points.map((point) => ({ x: point.x - minX, y: point.y - minY })),
+  };
+}
+
+function normalizeWall(value: unknown, usedIds: Set<string>, aliases: Map<string, string>): Wall | undefined {
+  if (!isRecord(value) || value.kind !== "wall") return undefined;
+  const id = uniqueId(value.id, "wall", usedIds, aliases);
+  const object = normalizePlanObject(value, id);
+  const x2 = optionalFiniteNumber(value.x2);
+  const y2 = optionalFiniteNumber(value.y2);
+  if (x2 === undefined || y2 === undefined) return undefined;
+  const length = Math.hypot(x2 - object.x, y2 - object.y);
+  if (length < 8) return undefined;
+  return {
+    ...object,
+    kind: "wall",
+    x2,
+    y2,
+    width: length,
+    height: finiteNumber(value.height, 12, 1),
+    thickness: finiteNumber(value.thickness, 12, 1),
+    rotation: (Math.atan2(y2 - object.y, x2 - object.x) * 180) / Math.PI,
+  };
+}
+
+function normalizeOpening(
+  value: unknown,
+  usedIds: Set<string>,
+  wallAliases: Map<string, string>,
+  wallIds: Set<string>,
+): Opening | undefined {
+  if (!isRecord(value) || (value.kind !== "door" && value.kind !== "window")) return undefined;
+  const id = uniqueId(value.id, value.kind, usedIds);
+  const object = normalizePlanObject(value, id);
+  const candidateWallId = typeof value.wallId === "string" ? wallAliases.get(value.wallId) : undefined;
+  const wallId = candidateWallId && wallIds.has(candidateWallId) ? candidateWallId : undefined;
+  return {
+    ...object,
+    kind: value.kind,
+    name: stringOr(value.name, value.kind === "door" ? "Door" : "Window"),
+    width: finiteNumber(value.width, value.kind === "door" ? 52 : 78, 8),
+    height: finiteNumber(value.height, value.kind === "door" ? 12 : 10, 1),
+    wallId,
+  };
+}
+
+function normalizeRoom(value: unknown, usedIds: Set<string>): Room | undefined {
+  if (!isRecord(value) || value.kind !== "room") return undefined;
+  const id = uniqueId(value.id, "room", usedIds);
+  const object = normalizePlanObject(value, id);
+  const shape = normalizeRoomShape(
+    Array.isArray(value.points) ? value.points.map(normalizePoint).filter((point): point is PlanPoint => Boolean(point)) : undefined,
+    object.x,
+    object.y,
+    object.width,
+    object.height,
+  );
+  return {
+    ...object,
+    ...shape,
+    kind: "room",
+    name: stringOr(value.name, "Room"),
+    color: stringOr(value.color, "#a8c8bb"),
+    ceilingHeightMeters: optionalFiniteNumber(value.ceilingHeightMeters, 0.1),
+  };
+}
+
+function normalizeFixture(value: unknown, usedIds: Set<string>): Fixture | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.kind !== "string" ||
+    !Object.prototype.hasOwnProperty.call(fixtureLabels, value.kind)
+  ) {
+    return undefined;
+  }
+  const kind = value.kind as FixtureKind;
+  const id = uniqueId(value.id, "fixture", usedIds);
+  return {
+    ...normalizePlanObject(value, id),
+    kind,
+    name: stringOr(value.name, fixtureLabels[kind]),
+  };
+}
+
 function normalizePlan(value: unknown): Plan {
   const fallback = emptyPlan();
   if (!isRecord(value)) return fallback;
   const scale = isRecord(value.scale) ? value.scale : {};
+  const usedIds = new Set<string>();
+  const wallAliases = new Map<string, string>();
+  const walls = Array.isArray(value.walls)
+    ? value.walls.map((wall) => normalizeWall(wall, usedIds, wallAliases)).filter((wall): wall is Wall => Boolean(wall))
+    : [];
+  const wallIds = new Set(walls.map((wall) => wall.id));
+  const openings = Array.isArray(value.openings)
+    ? value.openings
+        .map((opening) => normalizeOpening(opening, usedIds, wallAliases, wallIds))
+        .filter((opening): opening is Opening => Boolean(opening))
+    : [];
+  const rooms = Array.isArray(value.rooms)
+    ? value.rooms.map((room) => normalizeRoom(room, usedIds)).filter((room): room is Room => Boolean(room))
+    : [];
+  const fixtures = Array.isArray(value.fixtures)
+    ? value.fixtures.map((fixture) => normalizeFixture(fixture, usedIds)).filter((fixture): fixture is Plan["fixtures"][number] => Boolean(fixture))
+    : [];
   return {
     scale: {
-      ...fallback.scale,
-      ...scale,
-      pixelsPerMeter:
-        typeof scale.pixelsPerMeter === "number" && Number.isFinite(scale.pixelsPerMeter)
-          ? scale.pixelsPerMeter
-          : fallback.scale.pixelsPerMeter,
-      gridSize:
-        typeof scale.gridSize === "number" && Number.isFinite(scale.gridSize)
-          ? scale.gridSize
-          : fallback.scale.gridSize,
-      ceilingHeightMeters:
-        typeof scale.ceilingHeightMeters === "number" && Number.isFinite(scale.ceilingHeightMeters)
-          ? scale.ceilingHeightMeters
-          : fallback.scale.ceilingHeightMeters,
+      pixelsPerMeter: finiteNumber(scale.pixelsPerMeter, fallback.scale.pixelsPerMeter, 1),
+      gridSize: finiteNumber(scale.gridSize, fallback.scale.gridSize, 1),
+      ceilingHeightMeters: finiteNumber(scale.ceilingHeightMeters, fallback.scale.ceilingHeightMeters, 0.1),
+      backgroundX: optionalFiniteNumber(scale.backgroundX),
+      backgroundY: optionalFiniteNumber(scale.backgroundY),
+      backgroundWidth: optionalFiniteNumber(scale.backgroundWidth, 1),
+      backgroundHeight: optionalFiniteNumber(scale.backgroundHeight, 1),
+      backgroundVisible: typeof scale.backgroundVisible === "boolean" ? scale.backgroundVisible : undefined,
     },
     background: normalizeAsset(value.background),
-    walls: Array.isArray(value.walls) ? (value.walls as Plan["walls"]) : [],
-    openings: Array.isArray(value.openings) ? (value.openings as Plan["openings"]) : [],
-    rooms: Array.isArray(value.rooms) ? (value.rooms as Plan["rooms"]) : [],
-    fixtures: Array.isArray(value.fixtures) ? (value.fixtures as Plan["fixtures"]) : [],
+    walls,
+    openings,
+    rooms,
+    fixtures,
   };
 }
 
 function normalizeAlternative(value: unknown, index: number): Alternative {
   if (!isRecord(value)) return createAlternative(index === 0 ? "Current layout" : `Alternative ${index + 1}`);
+  const plan = normalizePlan(value.plan);
+  const roomIds = new Set(plan.rooms.map((room) => room.id));
+  const roomBoards = Array.isArray(value.roomBoards)
+    ? value.roomBoards
+        .map(normalizeRoomBoard)
+        .filter((board): board is RoomBoard => Boolean(board && roomIds.has(board.roomId)))
+    : [];
   return {
     id: stringOr(value.id, uid("alternative")),
     name: stringOr(value.name, index === 0 ? "Current layout" : `Alternative ${index + 1}`),
     createdAt: stringOr(value.createdAt, nowIso()),
-    plan: normalizePlan(value.plan),
-    roomBoards: Array.isArray(value.roomBoards)
-      ? value.roomBoards.map(normalizeRoomBoard).filter((board): board is RoomBoard => Boolean(board))
-      : [],
+    plan,
+    roomBoards,
   };
 }
 
@@ -537,9 +750,15 @@ export async function downloadProjectsJson(projects: PropertyProject[]) {
 
 export function parseProjectExport(text: string): PropertyProject[] {
   const parsed = JSON.parse(text) as unknown;
-  if (Array.isArray(parsed)) return parsed.map(normalizeProject);
+  const normalizeImportedProjects = (values: unknown[]) => {
+    if (values.length === 0 || values.some((value) => !isRecord(value))) {
+      throw new Error("Project export contains an invalid project.");
+    }
+    return values.map(normalizeProject);
+  };
+  if (Array.isArray(parsed)) return normalizeImportedProjects(parsed);
   if (!isRecord(parsed)) throw new Error("Project export must be a JSON object.");
-  if (Array.isArray(parsed.projects)) return parsed.projects.map(normalizeProject);
-  if (isRecord(parsed.project)) return [normalizeProject(parsed.project)];
+  if (Array.isArray(parsed.projects)) return normalizeImportedProjects(parsed.projects);
+  if (isRecord(parsed.project)) return normalizeImportedProjects([parsed.project]);
   throw new Error("Project export is missing a project or projects list.");
 }

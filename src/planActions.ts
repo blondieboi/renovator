@@ -1,10 +1,55 @@
-import { distance, snapPointToGrid, snapStructuralPoint, wallAngle } from "./geometry";
+import {
+  distance,
+  openingCenter,
+  placeOpeningAtCenter,
+  snapPointToGrid,
+  snapStructuralPoint,
+  wallAngle,
+} from "./geometry";
 import { safeGridSize } from "./model";
 import { isSimplePolygon } from "./topology";
-import type { Plan, PlanPoint, Room } from "./types";
+import type { Alternative, Opening, Plan, PlanPoint, Room, Wall } from "./types";
 import { roomPoints } from "./utils";
 
 export type RoomPointMoveResult = "moved" | "missing-room" | "invalid-polygon";
+
+const minimumWallLength = 8;
+
+function wallLength(wall: Wall) {
+  return Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y);
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function openingDistanceOnWall(opening: Opening, wall: Wall) {
+  const length = wallLength(wall);
+  if (length < minimumWallLength) return 0;
+  const center = openingCenter(opening);
+  const axis = { x: (wall.x2 - wall.x) / length, y: (wall.y2 - wall.y) / length };
+  return clamp((center.x - wall.x) * axis.x + (center.y - wall.y) * axis.y, 0, length);
+}
+
+function repositionOpeningOnWall(opening: Opening, wall: Wall, distanceAlongWall: number) {
+  const length = wallLength(wall);
+  if (length < minimumWallLength) return;
+  const axis = { x: (wall.x2 - wall.x) / length, y: (wall.y2 - wall.y) / length };
+  opening.width = Math.min(opening.width, length);
+  const halfWidth = opening.width / 2;
+  const centerDistance = clamp(distanceAlongWall, halfWidth, Math.max(halfWidth, length - halfWidth));
+  placeOpeningAtCenter(
+    opening,
+    { x: wall.x + axis.x * centerDistance, y: wall.y + axis.y * centerDistance },
+    wallAngle(wall),
+  );
+}
+
+function openingDistancesOnWall(plan: Plan, wall: Wall) {
+  return plan.openings
+    .filter((opening) => opening.wallId === wall.id)
+    .map((opening) => ({ opening, distance: openingDistanceOnWall(opening, wall) }));
+}
 
 export function moveWallInPlan(
   plan: Plan,
@@ -36,7 +81,59 @@ export function moveWallInPlan(
   wall.y += offset.y;
   wall.x2 += offset.x;
   wall.y2 += offset.y;
+  plan.openings.forEach((opening) => {
+    if (opening.wallId !== wall.id) return;
+    opening.x += offset.x;
+    opening.y += offset.y;
+  });
   return true;
+}
+
+export function rotateWallInPlan(plan: Plan, id: string, rotation: number) {
+  const wall = plan.walls.find((item) => item.id === id);
+  if (!wall) return false;
+  const attachedOpenings = openingDistancesOnWall(plan, wall);
+  const length = wallLength(wall);
+  if (length < minimumWallLength) return false;
+  const radians = (rotation * Math.PI) / 180;
+  wall.rotation = rotation;
+  wall.width = length;
+  wall.x2 = wall.x + length * Math.cos(radians);
+  wall.y2 = wall.y + length * Math.sin(radians);
+  attachedOpenings.forEach(({ opening, distance }) => repositionOpeningOnWall(opening, wall, distance));
+  return true;
+}
+
+export function resizeWallLengthInPlan(plan: Plan, id: string, length: number) {
+  const wall = plan.walls.find((item) => item.id === id);
+  if (!wall || length < minimumWallLength) return false;
+  const radians = (wall.rotation * Math.PI) / 180;
+  return resizeWallEndpointInPlan(plan, id, "end", {
+    x: wall.x + length * Math.cos(radians),
+    y: wall.y + length * Math.sin(radians),
+  });
+}
+
+export function removePlanObjectInAlternative(alternative: Alternative, id: string) {
+  const { plan } = alternative;
+  const wallExists = plan.walls.some((wall) => wall.id === id);
+  const roomExists = plan.rooms.some((room) => room.id === id);
+  const openingExists = plan.openings.some((opening) => opening.id === id);
+  const fixtureExists = plan.fixtures.some((fixture) => fixture.id === id);
+
+  if (wallExists) {
+    plan.walls = plan.walls.filter((wall) => wall.id !== id);
+    plan.openings.forEach((opening) => {
+      if (opening.wallId === id) opening.wallId = undefined;
+    });
+  }
+  if (roomExists) {
+    plan.rooms = plan.rooms.filter((room) => room.id !== id);
+    alternative.roomBoards = alternative.roomBoards.filter((board) => board.roomId !== id);
+  }
+  if (openingExists) plan.openings = plan.openings.filter((opening) => opening.id !== id);
+  if (fixtureExists) plan.fixtures = plan.fixtures.filter((fixture) => fixture.id !== id);
+  return wallExists || roomExists || openingExists || fixtureExists;
 }
 
 export function moveRectangularObjectInPlan(
@@ -98,6 +195,9 @@ export function resizeWallEndpointInPlan(
 ) {
   const wall = plan.walls.find((item) => item.id === wallId);
   if (!wall) return false;
+  const attachedOpenings = openingDistancesOnWall(plan, wall);
+  const opposite = endpoint === "start" ? { x: wall.x2, y: wall.y2 } : { x: wall.x, y: wall.y };
+  if (distance(opposite, nextPoint) < minimumWallLength) return false;
   if (endpoint === "start") {
     wall.x = nextPoint.x;
     wall.y = nextPoint.y;
@@ -105,7 +205,8 @@ export function resizeWallEndpointInPlan(
     wall.x2 = nextPoint.x;
     wall.y2 = nextPoint.y;
   }
-  wall.width = Math.max(1, Math.hypot(wall.x2 - wall.x, wall.y2 - wall.y));
+  wall.width = wallLength(wall);
   wall.rotation = wallAngle(wall);
+  attachedOpenings.forEach(({ opening, distance }) => repositionOpeningOnWall(opening, wall, distance));
   return true;
 }

@@ -1,11 +1,6 @@
 import { CopyPlus, PencilRuler, Trash2 } from "lucide-react";
-import type { Alternative, Floor, PropertyProject, Room } from "../types";
-import type { SelectablePlanObject } from "../model";
-
-type ActiveStructure =
-  | { type: "project"; property: PropertyProject }
-  | { type: "floor"; property: PropertyProject; floor: Floor }
-  | { type: "alternative"; property: PropertyProject; floor: Floor; alternative: Alternative };
+import type { Room } from "../types";
+import type { ActiveStructure, SelectablePlanObject } from "../model";
 
 interface InspectorPanelProps {
   title: string;

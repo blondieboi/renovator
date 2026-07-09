@@ -211,28 +211,39 @@ function resolveOpeningInterval(plan: Plan, opening: Opening, gridSize: number) 
 
 function buildJoints(plan: Plan, gridSize: number, issues: TopologyIssue[]) {
   const jointThreshold = snapThreshold(gridSize);
+  const exactTolerance = 0.001;
   const joints: WallJoint[] = [];
+  const endpoints = plan.walls.flatMap((wall) =>
+    (["start", "end"] as const).map((endpoint) => ({
+      wallId: wall.id,
+      endpoint,
+      point: wallEndpointPoint(wall, endpoint),
+    })),
+  );
+
+  endpoints.forEach((source, sourceIndex) => {
+    endpoints.slice(sourceIndex + 1).forEach((candidate) => {
+      if (source.wallId === candidate.wallId) return;
+      const endpointDistance = distance(source.point, candidate.point);
+      if (endpointDistance > exactTolerance && endpointDistance <= jointThreshold) {
+        issues.push({
+          kind: "near-miss-wall-end",
+          objectId: candidate.wallId,
+          message: "Wall endpoint is close to another endpoint but not exactly connected.",
+        });
+      }
+    });
+  });
+
   plan.walls.forEach((wall) => {
     (["start", "end"] as const).forEach((endpoint) => {
       const point = wallEndpointPoint(wall, endpoint);
       const nearest = joints
         .map((joint) => ({ joint, distance: distance(joint.point, point) }))
-        .filter((item) => item.distance <= jointThreshold)
+        .filter((item) => item.distance <= exactTolerance)
         .sort((a, b) => a.distance - b.distance)[0];
       if (nearest) {
-        if (nearest.distance > 0.001) {
-          issues.push({
-            kind: "near-miss-wall-end",
-            objectId: wall.id,
-            message: "Wall endpoint is close to another endpoint but not exactly connected.",
-          });
-        }
         nearest.joint.endpoints.push({ wallId: wall.id, endpoint });
-        const count = nearest.joint.endpoints.length;
-        nearest.joint.point = {
-          x: (nearest.joint.point.x * (count - 1) + point.x) / count,
-          y: (nearest.joint.point.y * (count - 1) + point.y) / count,
-        };
       } else {
         joints.push({
           id: `joint_${joints.length}`,

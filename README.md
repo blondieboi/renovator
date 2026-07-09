@@ -78,6 +78,8 @@ src/
     planToWorld.ts        Shared 2D plan to 3D world transform
     sceneBuilder.ts       Converts planner data into a Three.js scene graph
     wallGeometry.ts       Builds wall segments, door gaps, and window panes
+  hooks/
+    useProjectWorkspace.ts Project/floor/alternative selection and lifecycle actions
   components/
     MediaUploadAction.tsx
     PlanFixtureGlyph.tsx
@@ -87,14 +89,16 @@ src/
 
 ## Current Architecture Notes
 
-`App.tsx` is still large and owns most app state, but the repo has started moving toward clearer boundaries:
+`App.tsx` owns editor-specific interaction state, while project lifecycle and persistence coordination now live in focused hooks:
 
 - `model.ts` owns shared domain helpers and safe scale accessors.
 - `geometry.ts` owns pure 2D plan geometry.
+- `hooks/useProjectWorkspace.ts` owns project/floor/alternative selection and lifecycle actions.
+- `hooks/useProjectRepository.ts` owns safe IndexedDB hydration and queued persistence.
 - `three/` contains the first dedicated 3D boundary: transform math, scene assembly, and wall/opening geometry.
 - PDF and 3D code are lazy-loaded to keep the initial app bundle smaller.
 
-The next useful refactor is to split planner state/actions and canvas rendering into smaller modules before adding heavier 3D features.
+Further editor-specific interaction extraction can happen independently of project persistence and navigation.
 
 ## 3D Direction
 
@@ -111,8 +115,7 @@ Projects are saved locally in IndexedDB. Media assets are currently stored as da
 
 ## Known Caveats
 
-- No formal test suite yet
-- JSON import has minimal validation
+- The lightweight regression suite covers domain geometry, topology, plan mutations, and import normalization; canvas interaction remains manually verified.
 - Large PDF worker chunk is expected
 - 3D preview geometry is intentionally simple
 - Cloud sync is not implemented yet
