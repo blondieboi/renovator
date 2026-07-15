@@ -1,0 +1,17 @@
+apiVersion: northstar.dev/v1
+kind: Service
+metadata:
+  name: renovator
+  title: Renovator
+  description: A simple app to plan home renovations
+  tags:
+    - fullstack-app
+    - product
+spec:
+  owner: team:platform
+  lifecycle: production
+  system: products
+  language: TypeScript
+  links:
+    - name: Documentation
+      url: https://github.com/blondieboi/renovator#readme
