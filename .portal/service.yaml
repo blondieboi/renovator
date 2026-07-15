@@ -11,6 +11,7 @@ spec:
   owner: team:platform
   lifecycle: production
   tier: tier-1
+  type: webapp
   system: products
   language: TypeScript
   links:
